@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Upload XER - NEC Engineering Analysis System{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Upload Primavera P6 XER</h1>
+    <p class="subtitle">Upload a Primavera P6 programme file (XER format)</p>
+</div>
+
+<div class="upload-form-container">
+    <form action="/upload/xer" method="post" enctype="multipart/form-data" class="upload-form">
+        <div class="form-group">
+            <label for="file">Select XER File:</label>
+            <input type="file" name="file" id="file" accept=".xer" required class="file-input">
+            <small class="form-help">Only XER files are accepted</small>
+        </div>
+        
+        <div class="form-group">
+            <label for="project_name">Project Name (optional):</label>
+            <input type="text" name="project_name" id="project_name" placeholder="Enter project name" class="text-input">
+            <small class="form-help">If not provided, filename will be used</small>
+        </div>
+        
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Upload XER</button>
+            <a href="/" class="btn btn-secondary">Cancel</a>
+        </div>
+    </form>
+</div>
+
+{% if message %}
+<div class="alert alert-{{ message_type|default('info') }}">
+    {{ message }}
+</div>
+{% endif %}
+{% endblock %}
+
+
+

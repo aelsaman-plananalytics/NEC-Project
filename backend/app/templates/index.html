@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}NEC Engineering Analysis System (Test UI) - Home{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>NEC Engineering Analysis System</h1>
+    <p class="subtitle">Test UI - Upload and Process NEC Contracts</p>
+</div>
+
+<div class="action-buttons">
+    <div class="button-card">
+        <h2>Upload Document</h2>
+        <p>Upload an NEC contract scope document (PDF or Word)</p>
+        <a href="/upload/pdf" class="btn btn-primary">Upload Document</a>
+    </div>
+    
+    <div class="button-card">
+        <h2>Upload XER</h2>
+        <p>Upload a Primavera P6 programme file (XER)</p>
+        <a href="/upload/xer" class="btn btn-primary">Upload XER</a>
+    </div>
+</div>
+
+<div class="info-section">
+    <h3>About</h3>
+    <p>This is a temporary test interface for the NEC Engineering Analysis System backend.</p>
+    <p>Use the buttons above to upload contract documents (PDF or Word) or XER programme files for processing.</p>
+</div>
+{% endblock %}
+
+

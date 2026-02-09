@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Contract Analysis Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        h1, h2, h3 { color: #003366; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #999; padding: 8px; text-align: left; }
+        th { background-color: #e6eef7; }
+        .section { margin-bottom: 40px; }
+    </style>
+</head>
+<body>
+
+<h1>Contract Analysis Report</h1>
+<p><strong>Project:</strong> {{ project }}<br>
+<strong>Generated:</strong> {{ metadata.analysis_timestamp }}<br>
+<strong>Source File:</strong> {{ metadata.filename }}</p>
+
+<hr>
+
+<div class="section">
+<h2>1. Executive Summary</h2>
+<p>
+This report provides a structured analysis of the uploaded contract.  
+The system extracted programme-critical NEC provisions and evaluated document completeness.
+</p>
+
+<p><strong>Document Classification:</strong><br>
+Type: {{ contract_completeness.document_type }}<br>
+Template Detected: {{ contract_completeness.is_template }}<br>
+Completeness Score: {{ contract_completeness.filled_percentage }}%
+</p>
+</div>
+
+<div class="section">
+<h2>2. Contract Completeness Assessment</h2>
+<table>
+<tr><th>Clause</th><th>Title</th><th>Status</th><th>Extracted Value</th></tr>
+{% for num, clause in extracted_clauses.items() %}
+<tr>
+<td>{{ num }}</td>
+<td>{{ clause.title }}</td>
+<td>{{ clause.status }}</td>
+<td>{{ clause.value if clause.value else "—" }}</td>
+</tr>
+{% endfor %}
+</table>
+</div>
+
+<div class="section">
+<h2>3. Programme-Critical Contract Dates</h2>
+<table>
+<tr><th>Field</th><th>Value</th></tr>
+<tr><td>Starting Date</td><td>{{ contract_dates.starting_date or "—" }}</td></tr>
+<tr><td>Completion Date</td><td>{{ contract_dates.completion_date or "—" }}</td></tr>
+<tr><td>Possession Dates</td><td>{{ possession_dates or "—" }}</td></tr>
+<tr><td>First Programme Submission</td><td>{{ programme_requirements.submit_first_programme_within or "—" }}</td></tr>
+<tr><td>Revised Programme Interval</td><td>{{ programme_requirements.revised_programme_interval or "—" }}</td></tr>
+<tr><td>Delay Damages</td><td>{{ delay_damages or "—" }}</td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>4. Defects and Testing</h2>
+<table>
+<tr><th>Provision</th><th>Value</th></tr>
+<tr><td>Defects Date</td><td>{{ defects.defects_date or "—" }}</td></tr>
+<tr><td>Defect Correction Period</td><td>{{ defects.defect_correction_period or "—" }}</td></tr>
+<tr><td>Landscape Maintenance Period</td><td>{{ defects.landscaping_maintenance_period or "—" }}</td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>5. Payment Terms</h2>
+<table>
+<tr><th>Provision</th><th>Value</th></tr>
+<tr><td>Assessment Interval</td><td>{{ payment_terms.assessment_interval or "—" }}</td></tr>
+<tr><td>Payment Period</td><td>{{ payment_terms.payment_period or "—" }}</td></tr>
+<tr><td>Retention Percentage</td><td>{{ payment_terms.retention_percentage or "—" }}</td></tr>
+<tr><td>Bond Amount</td><td>{{ payment_terms.bond_amount or "—" }}</td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>6. Weather Data</h2>
+<table>
+<tr><th>Provision</th><th>Value</th></tr>
+<tr><td>Recording Location</td><td>{{ weather_data.recording_location or "—" }}</td></tr>
+<tr><td>Measurement Data</td><td>{{ weather_data.measurement_data or "—" }}</td></tr>
+<tr><td>Historical Records Source</td><td>{{ weather_data.historical_records_source or "—" }}</td></tr>
+</table>
+</div>
+
+<div class="section">
+<h2>7. Scope, Constraints, & Milestones</h2>
+
+<h3>Scope Items</h3>
+{% if scope_items %}
+<ul>{% for item in scope_items %}<li>{{ item }}</li>{% endfor %}</ul>
+{% else %}<p>No scope items extracted.</p>{% endif %}
+
+<h3>Constraints</h3>
+{% if constraints %}
+<ul>{% for c in constraints %}<li>{{ c }}</li>{% endfor %}</ul>
+{% else %}<p>No constraints extracted.</p>{% endif %}
+
+<h3>Milestones</h3>
+{% if milestones %}
+<ul>{% for m in milestones %}<li>{{ m }}</li>{% endfor %}</ul>
+{% else %}<p>No milestones extracted.</p>{% endif %}
+</div>
+
+<div class="section">
+<h2>8. Risk Assessment Summary</h2>
+<p>
+Based on extracted clauses, the contract currently lacks sufficient detail to support NEC programming requirements.
+Missing or blank fields introduce significant commercial and programme delivery risks.
+</p>
+</div>
+
+<div class="section">
+<h2>9. Recommendations</h2>
+<ul>
+<li>Populate all mandatory NEC dates (starting, completion, possession).</li>
+<li>Confirm programme submission and revision intervals.</li>
+<li>Provide weather data in compliance with NEC Clause 60.1(13).</li>
+<li>Complete all payment and defect-related fields.</li>
+<li>Re-run analysis when the complete contract is available.</li>
+</ul>
+</div>
+
+<div class="section">
+<h2>10. Metadata</h2>
+<p>
+Processed File: {{ metadata.filename }}<br>
+Total Pages: {{ metadata.total_pages }}<br>
+Output File: {{ metadata.output_filename }}<br>
+Extraction Confidence: {{ metadata.extraction_confidence }}<br>
+</p>
+</div>
+
+</body>
+</html>

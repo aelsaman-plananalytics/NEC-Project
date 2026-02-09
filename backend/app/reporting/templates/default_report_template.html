@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEC Contract Analysis Report</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>NEC Contract Analysis Report</h1>
+            <div class="metadata">
+                <p><strong>Project:</strong> {{ extraction_data.project }}</p>
+                <p><strong>Generated:</strong> {{ extraction_data.metadata.analysis_timestamp }}</p>
+                <p><strong>Source File:</strong> {{ extraction_data.metadata.filename }}</p>
+            </div>
+        </header>
+
+        <section class="executive-summary">
+            <h2>1. Executive Summary</h2>
+            <p>{{ narrative.executive_summary.summary }}</p>
+            <div class="status-box">
+                <p><strong>Document Type:</strong> {{ narrative.executive_summary.document_type }}</p>
+                <p><strong>Completeness Score:</strong> {{ narrative.executive_summary.completeness_score }}%</p>
+                <p><strong>Missing Clauses:</strong> {{ narrative.executive_summary.missing_clauses|length }}</p>
+            </div>
+        </section>
+
+        <section class="contract-overview">
+            <h2>2. Contract Overview</h2>
+            <table>
+                <tr>
+                    <th>Attribute</th>
+                    <th>Value</th>
+                </tr>
+                <tr>
+                    <td>Project Name</td>
+                    <td>{{ narrative.contract_overview.metadata.filename }}</td>
+                </tr>
+                <tr>
+                    <td>Total Pages</td>
+                    <td>{{ narrative.contract_overview.metadata.total_pages }}</td>
+                </tr>
+            </table>
+        </section>
+
+        <section class="completeness">
+            <h2>7. Clause Completeness Assessment</h2>
+            <p><strong>Filled Percentage:</strong> {{ narrative.completeness_assessment.filled_percentage }}%</p>
+            <table>
+                <tr>
+                    <th>Clause</th>
+                    <th>Title</th>
+                    <th>Status</th>
+                </tr>
+                {% for item in narrative.completeness_assessment.completeness_table %}
+                <tr>
+                    <td>{{ item.clause }}</td>
+                    <td>{{ item.title }}</td>
+                    <td>{{ item.status }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </section>
+
+        {% if narrative.programme_compliance %}
+        <section class="programme-compliance">
+            <h2>Programme Compliance</h2>
+            <p><strong>Schedule Quality Index:</strong> {{ narrative.programme_compliance.schedule_quality_index }}</p>
+        </section>
+        {% endif %}
+
+        <section class="recommendations">
+            <h2>9. Recommendations</h2>
+            <h3>Legal</h3>
+            <ul>
+                {% for rec in narrative.recommendations.legal %}
+                <li>{{ rec }}</li>
+                {% endfor %}
+            </ul>
+            <h3>Programme Management</h3>
+            <ul>
+                {% for rec in narrative.recommendations.programme_management %}
+                <li>{{ rec }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+    </div>
+</body>
+</html>

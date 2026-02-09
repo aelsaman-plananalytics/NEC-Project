@@ -1,0 +1,8 @@
+# Ignore all JSON output files
+*.json
+
+# But keep this directory
+!.gitignore
+
+
+
