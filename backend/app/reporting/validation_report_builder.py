@@ -670,7 +670,7 @@ def _section_scope_contract_alignment(
         else:
             constraint_summary = "No explicit contract constraints were extracted; confirm how constraints are managed."
 
-    # Report reflects validator result exactly. Do not recalculate or soften acceptability.
+    # Report reflects validator result exactly. Do not recalculate or soften acceptability. See backend/ACCEPTABILITY_INVARIANT.md.
     vs = _safe_dict(validation_summary)
     failure_reasons = _safe_list(_safe_get(vs, "acceptability_failure_reasons"))
     # Tripwire: report must never say "acceptable" while failure reasons exist.
@@ -678,6 +678,15 @@ def _section_scope_contract_alignment(
         raise RuntimeError(
             "Report contradiction: cannot output 'acceptable' while acceptability_failure_reasons is non-empty. Refusing to generate report."
         )
+    # Lock report consistency (ACCEPTABILITY_INVARIANT): if ACCEPTABLE, zero mandatory obligations may have aligned == False.
+    if _safe_get(vs, "acceptability_status") == "ACCEPTABLE" and _safe_get(scope_coverage, "obligation_entities_used"):
+        obligations_report = _safe_list(_safe_get(scope_coverage, "obligations_report"))
+        unaligned_mandatory = [o.get("id") for o in obligations_report if o.get("mandatory_for_acceptance") and o.get("aligned") is False]
+        if unaligned_mandatory:
+            raise RuntimeError(
+                "Report contradiction: acceptability_status is ACCEPTABLE but mandatory obligations have aligned=False. "
+                f"Unaligned mandatory obligation IDs: {unaligned_mandatory}. Refusing to generate report."
+            )
     # Fatal guard: if report would say "acceptable" while any mandatory obligation is not aligned, crash.
     if _safe_get(vs, "acceptability_status") == "ACCEPTABLE":
         not_rep = _safe_list(_safe_get(scope_coverage, "obligations_not_represented_but_mandatory"))

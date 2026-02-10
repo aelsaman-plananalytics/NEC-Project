@@ -156,6 +156,7 @@ def _contract_data_with_tw_and_wbs_only_obligation():
         "original_contract_text": "Utilities Diversions",
         "original_contract_texts": ["Utilities Diversions"],
         "canonical_name": "Utilities Diversions",
+        "canonical_match_string": "utilities diversions",
         "clause_references": [],
         "facets": {"has_scope_component": True, "has_programme_duty": False, "has_governance_requirement": False, "has_timing_requirement": False},
         "mandatory_for_acceptance": True,

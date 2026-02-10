@@ -20,3 +20,9 @@ When **obligation_entities_used** is true, programme acceptability is determined
 - **HYBRID**: phrase first; if not evidenced, then name/WBS substring match.
 
 See `comprehensive_validator.py` and `validation_report_builder.py` for references to this invariant.
+
+---
+
+## Engine frozen
+
+**The acceptability engine is frozen.** Future work must not modify acceptability logic without updating this document, the invariants in code, and the regression tests that protect the legal decision model.

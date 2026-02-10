@@ -924,7 +924,7 @@ class ComprehensiveValidator:
         Returns:
             Complete validation output with all sections
         """
-        # GLOBAL INVARIANT: When obligation_entities_used, only obligation alignment may set pass/ACCEPTABLE.
+        # ACCEPTABILITY INVARIANT (backend/ACCEPTABILITY_INVARIANT.md): When obligation_entities_used, only obligation alignment may set pass/ACCEPTABLE. No legacy engines, no scores, no report-layer inference.
         # Hard-disable legacy engines before any alignment runs.
         obligation_entities = contract_data.get("obligation_entities") or {}
         obligation_entities_used = bool(
@@ -2068,6 +2068,7 @@ class ComprehensiveValidator:
             req_lower = primary_text.lower()
 
             # Evidence mode: PHRASE | WBS_ONLY | HYBRID. If present but invalid → fail loud (configuration error).
+            # See ACCEPTABILITY_INVARIANT.md: obligation semantics are read-only; validator must never infer from text.
             evidence_mode_val = ob.get("evidence_mode")
             if evidence_mode_val is not None and str(evidence_mode_val).strip():
                 evidence_mode_raw = str(evidence_mode_val).strip().upper()
@@ -2079,6 +2080,15 @@ class ComprehensiveValidator:
                 evidence_mode = evidence_mode_raw
             else:
                 evidence_mode = EVIDENCE_MODE_PHRASE
+
+            # WBS_ONLY requires canonical_match_string at construction; no inference from text.
+            if evidence_mode == EVIDENCE_MODE_WBS_ONLY:
+                cms = ob.get("canonical_match_string")
+                if cms is None or not str(cms).strip():
+                    raise RuntimeError(
+                        f"Obligation {ob_id!r} has evidence_mode=WBS_ONLY but no canonical_match_string. "
+                        "WBS_ONLY obligations must be configured with canonical_match_string at construction."
+                    )
 
             # WBS_ONLY: evidence only if canonical_match_string in activity name or WBS path. No phrase, no component, no LLM.
             if evidence_mode == EVIDENCE_MODE_WBS_ONLY:
@@ -2250,7 +2260,7 @@ class ComprehensiveValidator:
             if is_ese_appraisal and _is_ese_assurance_obligation(primary_text, facets):
                 assurance_based = True
 
-            # ---- ALIGNMENT: aligned only for evidenced, acknowledged, or explicit_assumption in {client_responsibility, out_of_scope_at_this_stage}. ----
+            # ---- ALIGNMENT (ACCEPTABILITY_INVARIANT.md): aligned only if evidence satisfies evidence_mode, or acknowledged, or explicit_assumption in {client_responsibility, out_of_scope_at_this_stage}. Acknowledgement/assurance must NOT override WBS_ONLY. ----
             # covered_by_later_submission is advisory only and must NOT set aligned; mandatory with only this remain not aligned and block acceptability.
             explicit_assumption = (ob.get("explicit_assumption") or "").strip().lower()
             if explicit_assumption not in EXPLICIT_ASSUMPTION_VALUES:
@@ -2427,7 +2437,7 @@ class ComprehensiveValidator:
                 "Aligned may only come from evidenced, acknowledged, or explicit_assumption. IDs: " + ", ".join(contradiction)
             )
 
-        # SINGLE ACCEPTABILITY GATE: status and acceptability are determined only here. No other path may set pass/ACCEPTABLE when obligation_entities_used.
+        # SINGLE ACCEPTABILITY GATE (ACCEPTABILITY_INVARIANT.md): status and acceptability are determined only here. No legacy engines, no scores, no report-layer inference. No other path may set pass/ACCEPTABLE when obligation_entities_used. The acceptability engine is frozen; do not modify without updating invariants and tests.
         status = "fail" if failure_reasons else "pass"
         outcome = HARD_BREACH if status == "fail" else COMPLIANT
         aligned_count = sum(1 for r in obligations_report if r.get("aligned"))
