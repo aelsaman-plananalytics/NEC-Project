@@ -11,8 +11,8 @@ import tempfile
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
-from fastapi import APIRouter, UploadFile, File, HTTPException, status
+from typing import Optional, List, Any, Dict
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from app.p6_engine.xer_loader import XERLoader
@@ -20,7 +20,17 @@ from app.p6_engine.logic_checks import LogicChecker
 from app.p6_engine.comprehensive_validator import ComprehensiveValidator
 from app.p6_engine.validation_ai_review import review_validation
 from app.p6_engine.frozen_requirements import build_frozen_requirements
-from app.models.programme_output import ProgrammeOutput
+from app.p6_engine.submission_lifecycle import (
+    prepare_contract_for_validation,
+    get_stage_expectations,
+    compute_obligation_readiness,
+    normalize_submission_stage,
+)
+from app.api_contract import (
+    enrich_obligation_readiness_with_report,
+    assert_acceptability_authority,
+    _normalize_acceptability,
+)
 
 router = APIRouter(
     prefix="/api",
@@ -44,6 +54,8 @@ def _run_programme_validation(
     xer_content: bytes,
     xer_filename: str,
     contract_filename: str = "contract.pdf",
+    submission_stage: Optional[str] = None,
+    obligation_readiness: Optional[List[Dict[str, Any]]] = None,
 ) -> dict:
     """
     Run programme validation. Used by the validate_programme endpoint and by the full-review orchestrator.
@@ -94,6 +106,12 @@ def _run_programme_validation(
                 "xer_file": xer_filename,
             }
         }
+        # Layer 2: planner lifecycle (does not change acceptability_status or overall_status)
+        if submission_stage is not None:
+            output_dict["submission_stage"] = submission_stage
+            output_dict["lifecycle_expectations"] = get_stage_expectations(submission_stage)
+        if obligation_readiness is not None:
+            output_dict["obligation_readiness"] = obligation_readiness
 
         try:
             ai_review = review_validation(
@@ -118,7 +136,9 @@ def _run_programme_validation(
 @router.post("/validate_programme")
 async def validate_programme(
     xer_file: UploadFile = File(..., description="XER file from Primavera P6"),
-    json_file: Optional[UploadFile] = File(None, description="Optional: JSON from /api/analyze_contract; if omitted, latest from outputs/analysis_reports is used")
+    json_file: Optional[UploadFile] = File(None, description="Optional: JSON from /api/analyze_contract; if omitted, latest from outputs/analysis_reports is used"),
+    submission_stage_form: Optional[str] = Form(None, description="Optional: submission stage (e.g. first_programme, revised_programme, update) for lifecycle"),
+    planner_assumptions_form: Optional[str] = Form(None, description="Optional: JSON array of { obligation_id, assumption_type, rationale } for planner-declared assumptions"),
 ) -> JSONResponse:
     """
     Validate Primavera P6 programme against NEC contract.
@@ -195,9 +215,55 @@ async def validate_programme(
             contract_data["obligation_entities"] = {"obligations": [], "validation_error": str(e)}
             contract_data["frozen_requirements"] = []
 
+        # Layer 2: planner lifecycle — apply stage and merge assumptions (does not change acceptability logic)
+        # API contract: accept "initial" | "interim" | "final" (and internal names); echo back for response
+        submission_stage_api: Optional[str] = (submission_stage_form.strip() or None) if submission_stage_form else None
+        submission_stage_internal = normalize_submission_stage(submission_stage_api) if submission_stage_api else None
+        planner_assumptions_used: List[Dict[str, Any]] = []
+        if planner_assumptions_form:
+            try:
+                planner_assumptions_used = json.loads(planner_assumptions_form)
+                if not isinstance(planner_assumptions_used, list):
+                    planner_assumptions_used = []
+            except (json.JSONDecodeError, TypeError):
+                planner_assumptions_used = []
+        contract_data = prepare_contract_for_validation(contract_data, submission_stage_internal, planner_assumptions_used)
+        obligations_for_readiness = (contract_data.get("obligation_entities") or {}).get("obligations") or []
+        obligation_readiness = compute_obligation_readiness(obligations_for_readiness, submission_stage_internal) if obligations_for_readiness else []
+
         print(f"[VALIDATE_PROGRAMME] Loading XER file: {xer_file.filename}")
         xer_content = await xer_file.read()
-        output_dict = _run_programme_validation(contract_data, xer_content, xer_file.filename, contract_source)
+        output_dict = _run_programme_validation(
+            contract_data, xer_content, xer_file.filename, contract_source,
+            submission_stage=submission_stage_internal or submission_stage_api,
+            obligation_readiness=obligation_readiness,
+        )
+        if planner_assumptions_used:
+            output_dict["planner_assumptions_used"] = planner_assumptions_used
+
+        # API contract: top-level authoritative fields (copy only from validator; never recompute)
+        scope_coverage = (output_dict.get("alignment") or {}).get("scope_coverage") or {}
+        vs = output_dict.get("validation_summary") or {}
+        raw_acceptability = vs.get("acceptability_status")
+        output_dict["acceptability_status"] = _normalize_acceptability(raw_acceptability) or raw_acceptability
+        output_dict["overall_status"] = vs.get("overall_status")
+        output_dict["obligations_report"] = scope_coverage.get("obligations_report", [])
+        output_dict["obligations_not_represented_but_mandatory"] = scope_coverage.get("obligations_not_represented_but_mandatory", [])
+        output_dict["scope_evidence_table"] = scope_coverage.get("scope_evidence_table", [])
+        output_dict["submission_stage"] = submission_stage_api
+
+        # Enrich obligation_readiness (guidance only) with aligned and required_action from validator report
+        readiness = output_dict.get("obligation_readiness") or []
+        if readiness and scope_coverage.get("obligations_report"):
+            output_dict["obligation_readiness"] = enrich_obligation_readiness_with_report(
+                readiness, scope_coverage["obligations_report"]
+            )
+
+        assert_acceptability_authority(
+            output_dict.get("validation_summary") or {},
+            output_dict.get("acceptability_status"),
+            output_dict.get("overall_status"),
+        )
 
         # Save to validation_reports folder
         validation_dir = Path(__file__).parent.parent / "outputs" / "validation_reports"

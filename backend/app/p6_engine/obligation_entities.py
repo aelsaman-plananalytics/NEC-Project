@@ -126,9 +126,9 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
     original_contract_text (list of clause texts), clause_references (list), facets (dict),
     mandatory_for_acceptance (true if ANY facet requires it).
     """
-    # Raw items: (text, clause_ref, facet, mandatory, scope_class, evidence_mode_override, canonical_match_string_override).
-    # Overrides are set only at construction (e.g. injected obligations); validator must never infer from text.
-    RawItem = Tuple[str, str, str, bool, Optional[str], Optional[str], Optional[str]]
+    # Raw items: (text, clause_ref, facet, mandatory, scope_class, evidence_mode_override, canonical_match_string_override, required_from_stage_override).
+    # Overrides are set only at construction; validator must never infer from text.
+    RawItem = Tuple[str, str, str, bool, Optional[str], Optional[str], Optional[str], Optional[str]]
     raw: List[RawItem] = []
     pcm = contract_data.get("programme_compliance_model") or {}
 
@@ -140,20 +140,21 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
         scope_class: Optional[str] = None,
         evidence_mode_override: Optional[str] = None,
         canonical_match_string_override: Optional[str] = None,
+        required_from_stage_override: Optional[str] = None,
     ) -> None:
         if not text:
             return
-        raw.append((text.strip(), clause_ref, facet, mandatory, scope_class, evidence_mode_override, canonical_match_string_override))
+        raw.append((text.strip(), clause_ref, facet, mandatory, scope_class, evidence_mode_override, canonical_match_string_override, required_from_stage_override))
 
     for item in (contract_data.get("scope_items") or []):
         text = _original_text_from_item(item)
         clause_ref = _clause_reference_from_item(item)
         classification = classify_scope_obligation(text)
         mandatory = bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else (classification == SCOPE_CLASSIFICATION_ACTION_REQUIRED)
-        # Source items may provide evidence_mode / canonical_match_string; use them if present.
         ev_mode = item.get("evidence_mode") if isinstance(item, dict) else None
         cms = item.get("canonical_match_string") if isinstance(item, dict) else None
-        add(text, clause_ref, FACET_SCOPE, mandatory, classification, ev_mode, cms)
+        rfs = item.get("required_from_stage") if isinstance(item, dict) else None
+        add(text, clause_ref, FACET_SCOPE, mandatory, classification, ev_mode, cms, rfs)
 
     raw_programme = (pcm.get("programme_duties") or pcm.get("required_activities") or contract_data.get("programme_requirements") or [])
     if isinstance(raw_programme, dict):
@@ -164,20 +165,21 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
         text = _original_text_from_item(item)
         ev_mode = item.get("evidence_mode") if isinstance(item, dict) else None
         cms = item.get("canonical_match_string") if isinstance(item, dict) else None
-        add(text, _clause_reference_from_item(item) or "Clause 32 / programme", FACET_PROGRAMME_DUTY, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, ev_mode, cms)
+        rfs = item.get("required_from_stage") if isinstance(item, dict) else None
+        add(text, _clause_reference_from_item(item) or "Clause 32 / programme", FACET_PROGRAMME_DUTY, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, ev_mode, cms, rfs)
 
     for item in list(contract_data.get("constraints") or []) + list(pcm.get("sequencing_and_timing_constraints") or []):
         text = _original_text_from_item(item)
-        add(text, _clause_reference_from_item(item), FACET_TIMING, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None)
+        add(text, _clause_reference_from_item(item), FACET_TIMING, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None, None)
 
     for item in (pcm.get("programme_governance_and_acceptance_rules") or []) + (pcm.get("completion_and_takeover_gates") or []):
         text = _original_text_from_item(item)
-        add(text, _clause_reference_from_item(item), FACET_GOVERNANCE, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None)
+        add(text, _clause_reference_from_item(item), FACET_GOVERNANCE, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None, None)
 
     # NEC common requirement: inject Temporary Works if not already present. Configure semantics at construction (no text-based detection).
     tw_sig = _obligation_signature("Temporary Works")
     if not any(_obligation_signature(t) == tw_sig for t, *_ in raw):
-        add("Temporary Works", "", FACET_SCOPE, True, SCOPE_CLASSIFICATION_ACTION_REQUIRED, EVIDENCE_MODE_WBS_ONLY, "temporary works")
+        add("Temporary Works", "", FACET_SCOPE, True, SCOPE_CLASSIFICATION_ACTION_REQUIRED, EVIDENCE_MODE_WBS_ONLY, "temporary works", None)
 
     # Group by signature and merge
     by_signature: Dict[str, List[RawItem]] = {}
@@ -201,7 +203,8 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
         scope_class = SCOPE_CLASSIFICATION_ACTION_REQUIRED
         evidence_mode_merged: Optional[str] = None
         canonical_match_string_merged: Optional[str] = None
-        for text, clause_ref, facet, mand, scope_class_item, ev_override, cms_override in group:
+        required_from_stage_merged: Optional[str] = None
+        for text, clause_ref, facet, mand, scope_class_item, ev_override, cms_override, rfs_override in group:
             if text and text not in texts:
                 texts.append(text)
             if clause_ref and clause_ref not in clause_refs:
@@ -214,6 +217,8 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
                 evidence_mode_merged = str(ev_override).strip().upper()
             if cms_override is not None and str(cms_override).strip():
                 canonical_match_string_merged = str(cms_override).strip().lower()
+            if rfs_override is not None and str(rfs_override).strip():
+                required_from_stage_merged = str(rfs_override).strip().lower()
         primary_text = texts[0] if texts else ""
         canonical_match_string = canonical_match_string_merged if canonical_match_string_merged else primary_text.strip().lower()
         evidence_mode = evidence_mode_merged if evidence_mode_merged in (EVIDENCE_MODE_PHRASE, EVIDENCE_MODE_WBS_ONLY, EVIDENCE_MODE_HYBRID) else EVIDENCE_MODE_PHRASE
@@ -230,6 +235,8 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
             "scope_classification": scope_class if facets.get(FACET_SCOPE) else None,
             "_signature": signature,
         }
+        if required_from_stage_merged is not None:
+            ob_dict["required_from_stage"] = required_from_stage_merged
         obligations.append(ob_dict)
         seen_signatures.append(signature)
 
