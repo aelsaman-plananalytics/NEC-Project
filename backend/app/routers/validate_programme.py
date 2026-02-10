@@ -19,6 +19,7 @@ from app.p6_engine.xer_loader import XERLoader
 from app.p6_engine.logic_checks import LogicChecker
 from app.p6_engine.comprehensive_validator import ComprehensiveValidator
 from app.p6_engine.validation_ai_review import review_validation
+from app.p6_engine.frozen_requirements import build_frozen_requirements
 from app.models.programme_output import ProgrammeOutput
 
 router = APIRouter(
@@ -67,7 +68,8 @@ def _run_programme_validation(
         validation_output["schedule_health"] = validator._calculate_schedule_health(
             validation_output["programme_summary"], logic_checks
         )
-        validation_output["validation_summary"] = validator._calculate_validation_summary(validation_output)
+        # SINGLE AUTHORITY: validation_summary (including acceptability_status / overall_status) is set only inside validator.validate().
+        # Do NOT recalculate or overwrite here; when obligation_entities_used, acceptability comes only from _validate_obligation_entities.
         validation_output["alignment"] = validation_output.pop("nec_alignment", {})
 
         if "circular_dependencies" in logic_checks:
@@ -169,6 +171,29 @@ async def validate_programme(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid contract JSON: expected 'extracted_clauses' (legacy) or 'contract_dates' / 'programme_compliance_model' (analyze_contract output)."
             )
+
+        # Reject stale obligation_entities so we never trust old artefacts (even before we overwrite them).
+        _CURRENT_FROZEN_VERSION = 7
+        oe = contract_data.get("obligation_entities") or {}
+        if oe and isinstance(oe, dict) and (oe.get("frozen_requirements_version") or 0) < _CURRENT_FROZEN_VERSION:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Contract JSON has stale obligation_entities (version {oe.get('frozen_requirements_version', 0)}). Re-run contract analysis to get version {_CURRENT_FROZEN_VERSION} before validating."
+            )
+
+        # LIFECYCLE INVARIANT: All obligation entities MUST be rebuilt at validation time using current
+        # obligation-construction logic. Validation must NEVER trust obligation_entities stored in
+        # the uploaded or latest analysis JSON (they were built at analysis time and can be stale or
+        # predate logic changes e.g. mandatory Temporary Works). Rebuilding here ensures mandatory
+        # obligations always appear in obligations_report, programmes missing them FAIL acceptability,
+        # and scope & constraints sections reflect the same single source of truth.
+        try:
+            frozen = build_frozen_requirements(contract_data)
+            contract_data["obligation_entities"] = frozen["obligation_entities"]
+            contract_data["frozen_requirements"] = frozen["frozen_requirements"]
+        except Exception as e:
+            contract_data["obligation_entities"] = {"obligations": [], "validation_error": str(e)}
+            contract_data["frozen_requirements"] = []
 
         print(f"[VALIDATE_PROGRAMME] Loading XER file: {xer_file.filename}")
         xer_content = await xer_file.read()

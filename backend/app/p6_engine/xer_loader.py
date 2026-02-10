@@ -183,15 +183,32 @@ class XERLoader:
         return calendars
     
     def _parse_wbs(self, content: str) -> List[Dict[str, Any]]:
-        """Parse WBS from XER content."""
+        """Parse PROJWBS from XER: wbs_id, parent_wbs_id, wbs_name for WBS path building."""
         wbs = []
-        
-        # Find WBS section
-        wbs_match = re.search(r'%T\tPROJWBS(.*?)%E\tPROJWBS', content, re.DOTALL)
+        wbs_match = re.search(r'%T\s+PROJWBS\s*\n(.*?)%E\s+PROJWBS', content, re.DOTALL)
         if not wbs_match:
             return wbs
-        
-        # Similar parsing logic
+        section = wbs_match.group(1)
+        lines = [ln for ln in section.split('\n') if ln.strip()]
+        if len(lines) < 2 or not lines[0].startswith('%F'):
+            return wbs
+        headers = [h.strip() for h in lines[0].split('\t')[1:] if h.strip()]
+        for line in lines[1:]:
+            if not line.startswith('%R'):
+                continue
+            values = line.split('\t')[1:]
+            if len(values) < len(headers):
+                continue
+            row = dict(zip(headers, values))
+            wbs_id = (row.get('wbs_id') or row.get('proj_node_id') or '').strip()
+            wbs_name = (row.get('wbs_name') or row.get('name') or '').strip()
+            parent_wbs_id = (row.get('parent_wbs_id') or '').strip()
+            if wbs_id or wbs_name:
+                wbs.append({
+                    'wbs_id': wbs_id,
+                    'parent_wbs_id': parent_wbs_id,
+                    'wbs_name': wbs_name,
+                })
         return wbs
     
     def _parse_logic(self, content: str) -> List[Dict[str, Any]]:

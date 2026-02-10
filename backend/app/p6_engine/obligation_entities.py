@@ -45,6 +45,11 @@ SIGNATURE_PHRASES = [
     "revision",
 ]
 
+# Evidence mode: controls how programme activities evidence an obligation (single switch, no heuristics).
+EVIDENCE_MODE_PHRASE = "PHRASE"       # Default: phrase/component matching.
+EVIDENCE_MODE_WBS_ONLY = "WBS_ONLY"   # Evidence only if obligation text in activity name or WBS path (no phrase tokens).
+EVIDENCE_MODE_HYBRID = "HYBRID"       # Phrase OR name/WBS match.
+
 # Scope classification for evidence gate
 SCOPE_CLASSIFICATION_ACTION_REQUIRED = "ACTION_REQUIRED"
 SCOPE_CLASSIFICATION_ASSURANCE_REQUIRED = "ASSURANCE_REQUIRED"
@@ -154,6 +159,12 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
         text = _original_text_from_item(item)
         add(text, _clause_reference_from_item(item), FACET_GOVERNANCE, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None)
 
+    # Ensure "Temporary Works" is always a mandatory scope obligation (NEC common requirement).
+    # Without this, it only appears when the LLM (HybridAIExtractor) includes it in scope_items.
+    tw_sig = _obligation_signature("Temporary Works")
+    if not any(_obligation_signature(text) == tw_sig for text, _, _, _, _ in raw):
+        add("Temporary Works", "", FACET_SCOPE, True, SCOPE_CLASSIFICATION_ACTION_REQUIRED)
+
     # Group by signature and merge
     by_signature: Dict[str, List[Tuple[str, str, str, bool, Optional[str]]]] = {}
     for text, clause_ref, facet, mandatory, scope_class in raw:
@@ -183,16 +194,28 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
             if scope_class_item:
                 scope_class = scope_class_item
         primary_text = texts[0] if texts else ""
-        obligations.append({
+        canonical_match_string = primary_text.strip().lower()
+        ob_dict = {
             "id": f"OBL-{idx + 1:03d}",
             "original_contract_text": primary_text,
             "original_contract_texts": texts,
+            "canonical_name": primary_text,
+            "canonical_match_string": canonical_match_string,
             "clause_references": clause_refs,
             "facets": facets,
             "mandatory_for_acceptance": mandatory,
             "scope_classification": scope_class if facets.get(FACET_SCOPE) else None,
             "_signature": signature,
-        })
+        }
+        # WBS-critical obligations: evidence only from name/WBS substring (no phrase tokens).
+        primary_lower = primary_text.strip().lower()
+        if primary_lower == "temporary works":
+            ob_dict["evidence_mode"] = EVIDENCE_MODE_WBS_ONLY
+        elif primary_lower == "utilities diversions":
+            ob_dict["evidence_mode"] = EVIDENCE_MODE_WBS_ONLY
+        elif primary_lower == "traffic management":
+            ob_dict["evidence_mode"] = EVIDENCE_MODE_WBS_ONLY
+        obligations.append(ob_dict)
         seen_signatures.append(signature)
 
     # Safety assertion: no duplicate signatures (each signature appears once after merge)

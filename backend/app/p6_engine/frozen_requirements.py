@@ -27,9 +27,10 @@ def build_frozen_requirements(contract_data: Dict[str, Any]) -> Dict[str, Any]:
         "obligation_entities": {
             "obligations": obligations,
             "validation_error": entities.get("validation_error"),
+            "frozen_requirements_version": 7,
         },
         "frozen_requirements": frozen_requirements,
-        "frozen_requirements_version": 5,
+        "frozen_requirements_version": 7,
         "total_count": len(frozen_requirements),
         "obligation_entity_validation_error": entities.get("validation_error"),
     }

@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 from app.p6_engine.xer_loader import XERLoader
 from app.p6_engine.logic_checks import LogicChecker
 from app.p6_engine.obligation_entities import (
+    EVIDENCE_MODE_HYBRID,
+    EVIDENCE_MODE_PHRASE,
+    EVIDENCE_MODE_WBS_ONLY,
     SCOPE_CLASSIFICATION_ACTION_REQUIRED,
     SCOPE_CLASSIFICATION_ASSURANCE_REQUIRED,
 )
@@ -933,6 +936,20 @@ class ComprehensiveValidator:
             contract_data["programme_compliance_model"] = None
             contract_data["required_activities"] = []
 
+        # Mandatory-obligation existence assertion (contract completeness; does not decide acceptability).
+        if obligation_entities_used:
+            obligations_list = (contract_data.get("obligation_entities") or {}).get("obligations") or []
+            mandatory_names = {
+                (o.get("canonical_name") or o.get("original_contract_text") or "").strip().lower()
+                for o in obligations_list
+                if o.get("mandatory_for_acceptance")
+            }
+            if "temporary works" not in mandatory_names:
+                raise RuntimeError(
+                    "FATAL: Mandatory obligation 'Temporary Works' is missing from obligation_entities. "
+                    "This indicates a contract analysis / obligation construction failure."
+                )
+
         # Extract data once
         contract_summary = self._extract_contract_clauses(contract_data)
         programme_summary = self._extract_programme_data(p6_data)
@@ -988,13 +1005,15 @@ class ComprehensiveValidator:
         vs = validation_output.get("validation_summary") or {}
         obligations_report = scope_cov.get("obligations_report") or []
 
-        # FINAL ABSOLUTE TRIPWIRE (last executable line before return). Any unaligned mandatory or mandatory with only covered_by_later_submission => crash.
+        # FINAL INVARIANT: If any mandatory obligation has aligned == False, the system must NEVER return pass or "Acceptable at this stage". Tripwire only when summary contradicts (says acceptable but we have unaligned mandatory).
         if obligation_entities_used:
             failing = [
                 o.get("id") for o in obligations_report
                 if o.get("mandatory_for_acceptance") and not o.get("aligned")
             ]
-            if failing:
+            acceptable_status = vs.get("acceptability_status") == "ACCEPTABLE"
+            overall_pass = vs.get("overall_status") == "pass"
+            if failing and (acceptable_status or overall_pass):
                 raise RuntimeError(
                     "FATAL: Programme marked acceptable with unaligned mandatory obligations: {}".format(failing)
                 )
@@ -1002,7 +1021,7 @@ class ComprehensiveValidator:
                 o.get("id") for o in obligations_report
                 if o.get("mandatory_for_acceptance") and (o.get("explicit_assumption") or "").strip().lower() == "covered_by_later_submission"
             ]
-            if covered_later:
+            if covered_later and (acceptable_status or overall_pass):
                 raise RuntimeError(
                     "FATAL: Programme marked acceptable while mandatory obligation(s) have only 'covered_by_later_submission' (advisory only; must not justify acceptance): {}".format(covered_later)
                 )
@@ -1125,10 +1144,36 @@ class ComprehensiveValidator:
         logic = p6_data.get("logic", [])
         constraints = p6_data.get("constraints", [])
         metadata = p6_data.get("metadata", {})
-        
-        # Extract activity details
+        wbs_list = p6_data.get("wbs", []) or []
+
+        # Build wbs_id -> full path (e.g. "Project / Phase 1 / Temporary Works")
+        wbs_id_to_path: Dict[str, str] = {}
+        wbs_by_id = {(n.get("wbs_id") or "").strip(): n for n in wbs_list if (n.get("wbs_id") or "").strip()}
+        def path_for(wbs_id: str) -> str:
+            if not wbs_id or wbs_id in wbs_id_to_path:
+                return wbs_id_to_path.get(wbs_id, "")
+            node = wbs_by_id.get(wbs_id)
+            if not node:
+                return ""
+            name = (node.get("wbs_name") or node.get("name") or "").strip()
+            parent_id = (node.get("parent_wbs_id") or "").strip()
+            if not parent_id:
+                wbs_id_to_path[wbs_id] = name
+                return name
+            parent_path = path_for(parent_id)
+            out = f"{parent_path} / {name}" if parent_path else name
+            wbs_id_to_path[wbs_id] = out
+            return out
+        for n in wbs_list:
+            wid = (n.get("wbs_id") or "").strip()
+            if wid:
+                path_for(wid)
+
+        # Extract activity details (include wbs_path for obligation rules e.g. Temporary Works)
         activity_details = []
         for act in activities:
+            wbs_id = (act.get("wbs_id") or act.get("proj_node_id") or "").strip()
+            wbs_path = wbs_id_to_path.get(wbs_id, "") if wbs_id else ""
             activity_details.append({
                 "id": act.get("task_id") or act.get("id", ""),
                 "name": act.get("task_name") or act.get("name", ""),
@@ -1136,7 +1181,8 @@ class ComprehensiveValidator:
                 "finish": act.get("finish_date") or act.get("finish", ""),
                 "calendar": act.get("calendar_id") or act.get("calendar", ""),
                 "float": float(act.get("total_float", 0) or 0),
-                "critical": act.get("critical_flag", False) or (float(act.get("total_float", 0) or 0) <= 0)
+                "critical": act.get("critical_flag", False) or (float(act.get("total_float", 0) or 0) <= 0),
+                "wbs_path": wbs_path,
             })
         
         # Extract data date
@@ -1968,12 +2014,14 @@ class ComprehensiveValidator:
                 "failure_reason": None,
             }
 
+        # (activity_id, name_lower, wbs_path) for evidence and hard-coded rules (e.g. Temporary Works)
         activity_rows: List[tuple] = []
         for act in activities:
             aid = (act.get("id") or act.get("task_id") or "").strip()
             name = (act.get("name") or act.get("task_name") or "").strip()
+            wbs_path = (act.get("wbs_path") or "").strip()
             if aid or name:
-                activity_rows.append((aid, name.lower()))
+                activity_rows.append((aid, name.lower(), wbs_path))
         activity_rows.sort(key=lambda x: (x[0] or ""))
 
         programme_constraint_texts: List[str] = []
@@ -1990,11 +2038,12 @@ class ComprehensiveValidator:
         is_ese_appraisal = (stage_info.get("stage") == "DESIGN_STAGE")
 
         # -------------------------------------------------------------------------
-        # GLOBAL INVARIANT (non-negotiable). WHEN obligation_entities_used == True:
+        # ACCEPTABILITY INVARIANT (see backend/ACCEPTABILITY_INVARIANT.md).
+        # WHEN obligation_entities_used == True:
         #   Programme is ACCEPTABLE ⇔ EVERY mandatory obligation has aligned == True.
         #   aligned = True only when: evidenced_by_activities OR acknowledged OR explicit_assumption in {client_responsibility, out_of_scope_at_this_stage}.
         #   explicit_assumption == "covered_by_later_submission" does NOT set aligned; it is advisory only and must block acceptability if mandatory.
-        #   Anything else is FAILURE. No other concept (assurance, implicit, confidence, judgement, narrative, scores) may affect this.
+        #   Obligation alignment is the only authority; no scores, confidence, narrative, or PCM may affect acceptability.
         # -------------------------------------------------------------------------
         EXPLICIT_ASSUMPTION_VALUES = frozenset({
             "covered_by_later_submission",
@@ -2018,58 +2067,169 @@ class ComprehensiveValidator:
             scope_class = ob.get("scope_classification") or SCOPE_CLASSIFICATION_ACTION_REQUIRED
             req_lower = primary_text.lower()
 
-            # ---- Evidence from activities: optional LLM (engineering model) or phrase-based ----
-            evidence_phrases = self._extract_evidence_phrases(primary_text)  # always set for reporting
-            evidence_ids = []
-            evidenced_by_activities = False
-            evidence_method = "phrase"
-            use_llm_evidence = os.environ.get("USE_LLM_OBLIGATION_EVIDENCE", "").strip().lower() in ("1", "true", "yes")
-            if use_llm_evidence:
-                try:
-                    from app.p6_engine.validation_ai_review import evaluate_obligation_evidence_llm
-                    evidenced_llm, ids_llm = evaluate_obligation_evidence_llm(primary_text, activity_rows)
-                    if evidenced_llm and ids_llm:
-                        evidence_ids = ids_llm
-                        evidenced_by_activities = True
-                        evidence_method = "llm"
-                except Exception:
-                    pass
-            if not evidenced_by_activities:
-                # Phrase-based: any activity whose name contains any evidence phrase counts as evidence.
-                for act_id, name_lower in activity_rows:
-                    if self._phrase_evidences_obligation(name_lower, evidence_phrases):
-                        evidence_ids.append(act_id)
-                evidenced_by_activities = len(evidence_ids) > 0
+            # Evidence mode: PHRASE | WBS_ONLY | HYBRID. If present but invalid → fail loud (configuration error).
+            evidence_mode_val = ob.get("evidence_mode")
+            if evidence_mode_val is not None and str(evidence_mode_val).strip():
+                evidence_mode_raw = str(evidence_mode_val).strip().upper()
+                if evidence_mode_raw not in (EVIDENCE_MODE_PHRASE, EVIDENCE_MODE_WBS_ONLY, EVIDENCE_MODE_HYBRID):
+                    raise RuntimeError(
+                        f"Invalid evidence_mode for obligation {ob_id!r}: {evidence_mode_val!r}. "
+                        f"Allowed: PHRASE, WBS_ONLY, HYBRID."
+                    )
+                evidence_mode = evidence_mode_raw
+            else:
+                evidence_mode = EVIDENCE_MODE_PHRASE
 
-            # For reporting only: components and covered (derived from phrase match for compatibility)
-            components = self._extract_obligation_action_components(primary_text)
-            covered: Set[str] = set()
-            if evidence_phrases and evidence_ids:
-                for _, name_lower in activity_rows:
-                    for comp in components:
-                        if comp not in covered and self._activity_covers_component(name_lower, comp):
-                            covered.add(comp)
-            all_components_covered = len(covered) == len(components) if components else False
-            dominant_covered_rest_advisory = False
-            if not all_components_covered and components:
-                dominant = self._dominant_component(components)
-                uncovered = [c for c in components if c not in covered]
-                dominant_covered = (dominant in covered) or any(
-                    self._activity_covers_component(name_lower, dominant)
-                    for _, name_lower in activity_rows
-                )
-                if dominant_covered and uncovered and all(self._is_advisory_component(c) for c in uncovered):
-                    dominant_covered_rest_advisory = True
-            if not evidenced_by_activities and (all_components_covered or (len(components) >= 2 and dominant_covered_rest_advisory)):
-                evidenced_by_activities = True
-                if not evidence_ids:
-                    for act_id, name_lower in activity_rows:
+            # WBS_ONLY: evidence only if canonical_match_string in activity name or WBS path. No phrase, no component, no LLM.
+            if evidence_mode == EVIDENCE_MODE_WBS_ONLY:
+                search_str = ob.get("canonical_match_string")
+                if search_str is None or (isinstance(search_str, str) and not search_str.strip()):
+                    search_str = (primary_text or ob.get("canonical_name") or "").strip().lower()
+                else:
+                    search_str = str(search_str).strip().lower()
+                evidence_phrases = []
+                evidence_ids = []
+                evidenced_by_activities = False
+                evidence_method = "wbs_only"
+                components = []
+                covered = set()
+                all_components_covered = False
+                dominant_covered_rest_advisory = False
+                phrase_evidence_detected = False  # WBS_ONLY path never runs phrase/component/LLM
+                ids_in_name: Set[str] = set()
+                ids_in_wbs: Set[str] = set()
+                if search_str:
+                    ids_in_name = {aid for aid, name_lower, _ in activity_rows if search_str in (name_lower or "")}
+                    ids_in_wbs = {aid for aid, _, wbs in activity_rows if search_str in (wbs or "").lower()}
+                    any_wbs_evidence = ids_in_name or ids_in_wbs
+                    evidenced_by_activities = bool(any_wbs_evidence)
+                    evidence_ids = list(ids_in_name | ids_in_wbs)[:20] if any_wbs_evidence else []
+                if search_str and (ids_in_name or ids_in_wbs) and not evidenced_by_activities:
+                    raise RuntimeError(
+                        "FATAL: WBS_ONLY obligation has programme evidence (name or WBS) but evidenced_by_activities is False. "
+                        f"obligation_id={ob_id}, primary_text={primary_text!r}, evidence_mode={evidence_mode}"
+                    )
+            elif evidence_mode == EVIDENCE_MODE_HYBRID:
+                # Phrase logic first; if not evidenced, also check name/WBS for obligation text.
+                evidence_phrases = self._extract_evidence_phrases(primary_text)
+                evidence_ids = []
+                evidenced_by_activities = False
+                evidence_method = "phrase"
+                use_llm_evidence = os.environ.get("USE_LLM_OBLIGATION_EVIDENCE", "").strip().lower() in ("1", "true", "yes")
+                if use_llm_evidence:
+                    try:
+                        from app.p6_engine.validation_ai_review import evaluate_obligation_evidence_llm
+                        activity_rows_id_name = [(r[0], r[1]) for r in activity_rows]
+                        evidenced_llm, ids_llm = evaluate_obligation_evidence_llm(primary_text, activity_rows_id_name)
+                        if evidenced_llm and ids_llm:
+                            evidence_ids = ids_llm
+                            evidenced_by_activities = True
+                            evidence_method = "llm"
+                    except Exception:
+                        pass
+                if not evidenced_by_activities:
+                    for act_id, name_lower, _ in activity_rows:
+                        if self._phrase_evidences_obligation(name_lower, evidence_phrases):
+                            evidence_ids.append(act_id)
+                    evidenced_by_activities = len(evidence_ids) > 0
+                if not evidenced_by_activities:
+                    search_str = ob.get("canonical_match_string") or (primary_text or ob.get("canonical_name") or "").strip().lower()
+                    if isinstance(search_str, str) and search_str.strip():
+                        search_str = search_str.strip().lower()
+                        ids_in_name = {aid for aid, name_lower, _ in activity_rows if search_str in (name_lower or "")}
+                        ids_in_wbs = {aid for aid, _, wbs in activity_rows if search_str in (wbs or "").lower()}
+                        if ids_in_name or ids_in_wbs:
+                            evidenced_by_activities = True
+                            evidence_ids = list(ids_in_name | ids_in_wbs)[:20]
+                            evidence_method = "hybrid"
+                phrase_evidence_detected = evidence_method in ("phrase", "llm")
+                components = self._extract_obligation_action_components(primary_text)
+                covered = set()
+                if evidence_phrases and evidence_ids:
+                    for _, name_lower, _ in activity_rows:
                         for comp in components:
-                            if self._activity_covers_component(name_lower, comp):
-                                evidence_ids.append(act_id)
+                            if comp not in covered and self._activity_covers_component(name_lower, comp):
+                                covered.add(comp)
+                all_components_covered = len(covered) == len(components) if components else False
+                dominant_covered_rest_advisory = False
+                if not all_components_covered and components:
+                    dominant = self._dominant_component(components)
+                    uncovered = [c for c in components if c not in covered]
+                    dominant_covered = (dominant in covered) or any(
+                        self._activity_covers_component(name_lower, dominant)
+                        for _, name_lower, _ in activity_rows
+                    )
+                    if dominant_covered and uncovered and all(self._is_advisory_component(c) for c in uncovered):
+                        dominant_covered_rest_advisory = True
+                if not evidenced_by_activities and (all_components_covered or (len(components) >= 2 and dominant_covered_rest_advisory)):
+                    evidenced_by_activities = True
+                    if not evidence_ids:
+                        for act_id, name_lower, _ in activity_rows:
+                            for comp in components:
+                                if self._activity_covers_component(name_lower, comp):
+                                    evidence_ids.append(act_id)
+                                    break
+                            if evidence_ids:
                                 break
-                        if evidence_ids:
-                            break
+            else:
+                # PHRASE (default): optional LLM or phrase-based + component coverage.
+                evidence_phrases = self._extract_evidence_phrases(primary_text)
+                evidence_ids = []
+                evidenced_by_activities = False
+                evidence_method = "phrase"
+                use_llm_evidence = os.environ.get("USE_LLM_OBLIGATION_EVIDENCE", "").strip().lower() in ("1", "true", "yes")
+                if use_llm_evidence:
+                    try:
+                        from app.p6_engine.validation_ai_review import evaluate_obligation_evidence_llm
+                        activity_rows_id_name = [(r[0], r[1]) for r in activity_rows]
+                        evidenced_llm, ids_llm = evaluate_obligation_evidence_llm(primary_text, activity_rows_id_name)
+                        if evidenced_llm and ids_llm:
+                            evidence_ids = ids_llm
+                            evidenced_by_activities = True
+                            evidence_method = "llm"
+                    except Exception:
+                        pass
+                if not evidenced_by_activities:
+                    for act_id, name_lower, _ in activity_rows:
+                        if self._phrase_evidences_obligation(name_lower, evidence_phrases):
+                            evidence_ids.append(act_id)
+                    evidenced_by_activities = len(evidence_ids) > 0
+                phrase_evidence_detected = True  # PHRASE path always uses phrase/component/LLM
+                components = self._extract_obligation_action_components(primary_text)
+                covered = set()
+                if evidence_phrases and evidence_ids:
+                    for _, name_lower, _ in activity_rows:
+                        for comp in components:
+                            if comp not in covered and self._activity_covers_component(name_lower, comp):
+                                covered.add(comp)
+                all_components_covered = len(covered) == len(components) if components else False
+                dominant_covered_rest_advisory = False
+                if not all_components_covered and components:
+                    dominant = self._dominant_component(components)
+                    uncovered = [c for c in components if c not in covered]
+                    dominant_covered = (dominant in covered) or any(
+                        self._activity_covers_component(name_lower, dominant)
+                        for _, name_lower, _ in activity_rows
+                    )
+                    if dominant_covered and uncovered and all(self._is_advisory_component(c) for c in uncovered):
+                        dominant_covered_rest_advisory = True
+                if not evidenced_by_activities and (all_components_covered or (len(components) >= 2 and dominant_covered_rest_advisory)):
+                    evidenced_by_activities = True
+                    if not evidence_ids:
+                        for act_id, name_lower, _ in activity_rows:
+                            for comp in components:
+                                if self._activity_covers_component(name_lower, comp):
+                                    evidence_ids.append(act_id)
+                                    break
+                            if evidence_ids:
+                                break
+
+            # Guard: WBS_ONLY must never be satisfied by phrase/component/LLM evidence.
+            if evidence_mode == EVIDENCE_MODE_WBS_ONLY and phrase_evidence_detected:
+                raise RuntimeError(
+                    "ILLEGAL: Phrase evidence applied to WBS_ONLY obligation. "
+                    f"obligation_id={ob_id}, primary_text={primary_text!r}"
+                )
 
             # ---- Acknowledged (constraints / sequencing) ----
             acknowledged = False
@@ -2103,6 +2263,9 @@ class ComprehensiveValidator:
                 }.get(explicit_assumption, explicit_assumption)
 
             aligned = evidenced_by_activities or acknowledged or (explicit_assumption in EXPLICIT_ASSUMPTION_ACCEPTABILITY)
+            # Mandatory + WBS_ONLY: alignment only via WBS/name evidence. Acknowledgement/assurance must never set aligned.
+            if mandatory and evidence_mode == EVIDENCE_MODE_WBS_ONLY:
+                aligned = bool(evidenced_by_activities)
             alignment_basis: Optional[str] = None
             exemption_reason: Optional[str] = None
             if evidenced_by_activities:
@@ -2143,11 +2306,27 @@ class ComprehensiveValidator:
             # "Not represented but mandatory" = mandatory and not aligned (includes covered_by_later_submission-only; that assumption does not count for acceptability).
             not_represented_but_mandatory = mandatory and not aligned
 
+            # Required action (presentation only): what to add to the programme to pass. Does not affect alignment or acceptability.
+            canonical_match_string = ob.get("canonical_match_string") or primary_text.strip().lower()
+            if not aligned and mandatory:
+                if evidence_mode == EVIDENCE_MODE_WBS_ONLY:
+                    required_action = f"Add at least one activity under a WBS or activity name containing '{canonical_match_string}'"
+                elif evidence_mode == EVIDENCE_MODE_PHRASE:
+                    required_action = f"Add an activity explicitly covering \"{primary_text}\""
+                elif evidence_mode == EVIDENCE_MODE_HYBRID:
+                    required_action = f"Add phrase evidence or a WBS/activity name containing '{canonical_match_string}'"
+                else:
+                    required_action = f"Add an activity explicitly covering \"{primary_text}\""
+            else:
+                required_action = None
+
             clause_ref = clause_refs[0] if clause_refs else ""
             obligations_report.append({
                 "id": ob_id,
                 "original_contract_text": primary_text,
                 "original_contract_texts": texts,
+                "canonical_name": ob.get("canonical_name"),
+                "canonical_match_string": ob.get("canonical_match_string"),
                 "clause_references": clause_refs,
                 "clause_reference": clause_ref,
                 "facets": facets,
@@ -2156,6 +2335,8 @@ class ComprehensiveValidator:
                 "evidenced_by_activities": evidenced_by_activities,
                 "evidenced": evidenced_by_activities,
                 "evidence_activity_ids": evidence_ids,
+                "evidence_mode": ob.get("evidence_mode"),
+                "required_action": required_action,
                 "acknowledged": acknowledged,
                 "assurance_based": assurance_based,
                 "aligned": aligned,
@@ -2524,7 +2705,17 @@ class ComprehensiveValidator:
     ) -> Dict[str, Any]:
         """
         Legacy: scope items, required activities, constraints (when frozen_requirements not present).
+        MUST NOT run when obligation_entities are present; scope_coverage is set by _validate_obligation_entities only.
         """
+        # Tripwire: if obligation entities exist, this legacy engine must never run.
+        obligation_entities = contract_data.get("obligation_entities") or {}
+        obligations_list = obligation_entities.get("obligations") if isinstance(obligation_entities, dict) else None
+        if isinstance(obligations_list, list) and len(obligations_list) > 0:
+            raise RuntimeError(
+                "Ghost engine: _validate_scope_coverage must not run when contract has obligation_entities. "
+                "Scope and constraints must be derived only from _validate_obligation_entities."
+            )
+
         def _normalize_to_strings(items: Any) -> List[str]:
             out: List[str] = []
             for item in (items or []):

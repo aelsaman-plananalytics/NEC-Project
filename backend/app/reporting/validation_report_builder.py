@@ -426,204 +426,249 @@ def _section_scope_contract_alignment(
     scope_coverage: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """How the programme reflects contract scope and constraints using actual evidence.
-    Presentation only: acceptability and failure reasons come from validation_summary; we do not re-derive or soften."""
+    Presentation only: acceptability and failure reasons come from validation_summary; we do not re-derive or soften.
+    See backend/ACCEPTABILITY_INVARIANT.md: obligation alignment is the only authority when obligation_entities_used.
+
+    INVARIANT (obligation_entities_used == True):
+    - scope_rows and constraint_rows are derived ONLY from scope_evidence_table and constraints_control.
+    - Legacy scope_items, PCM, matched_map/missing_map, COVERAGE_* labels, and confidence-based representation are NOT used.
+    - scope_summary and constraint_summary are set from obligation-only messaging; no split-brain with legacy scope."""
     scope_coverage = scope_coverage or {}
     cs = _safe_dict(contract_summary)
-    scope_items = _extract_text_list(_safe_get(cs, "scope_items") or [])
-    constraints = _extract_text_list(_safe_get(cs, "constraints") or [])
-
-    # Build evidence maps from entries (entries have full structure; matched/missing are strings only).
-    required = _safe_dict(_safe_get(_safe_dict(pcm), "required_activities"))
-    entries = _safe_list(_safe_get(required, "entries"))
-
-    matched_map: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"activities": set(), "basis": set(), "explanations": set()})
-    missing_map: Dict[str, str] = {}
-    for entry in entries:
-        ent = _safe_dict(entry) if not isinstance(entry, dict) else entry
-        key = _canonical_text(_safe_str(_safe_get(ent, "requirement")))
-        if not key:
-            continue
-        status = _safe_get(ent, "status")
-        if status == "FOUND":
-            mpa = _safe_get(ent, "matched_programme_activities")
-            activities_list = mpa if isinstance(mpa, list) else [mpa] if mpa else []
-            for act in activities_list:
-                if act:
-                    matched_map[key]["activities"].add(str(act))
-            basis = _safe_get(ent, "matching_basis")
-            if basis:
-                matched_map[key]["basis"].add(str(basis))
-            expl = _safe_get(ent, "matching_explanation")
-            if expl:
-                matched_map[key]["explanations"].add(str(expl))
-        else:
-            if key not in missing_map:
-                missing_map[key] = _safe_str(_safe_get(ent, "matching_explanation"), "No programme activity recorded for this obligation.")
-
-    # Build programme activities list for governance evidence lookup
-    ps = _safe_dict(programme_summary)
-    programme_activities: List[str] = []
-    for item in _safe_list(_safe_get(ps, "activities")):
-        it = _safe_dict(item) if not isinstance(item, dict) else item
-        name = _safe_get(it, "name") or _safe_get(it, "task_name") or _safe_get(it, "activity_name")
-        if name:
-            programme_activities.append(str(name).strip())
-    for item in _safe_list(_safe_get(ps, "critical_path")):
-        it = _safe_dict(item) if not isinstance(item, dict) else item
-        name = _safe_get(it, "name")
-        if name:
-            programme_activities.append(str(name).strip())
-    seen = set()
-    ordered_programme_activities: List[str] = []
-    for name in programme_activities:
-        if name and name not in seen:
-            ordered_programme_activities.append(name)
-            seen.add(name)
+    obligation_entities_used = _safe_get(scope_coverage, "obligation_entities_used")
 
     scope_rows: List[Dict[str, Any]] = []
-    for scope_text in scope_items:
-        canonical = _canonical_text(scope_text)
-        classification = _classify_scope_item(scope_text)
-        row_status: str
-        programme_evidence: List[str] = []
-        notes_parts: List[str] = []
-
-        evidence_role = "Scope alignment"
-
-        if classification == SCOPE_ASSURANCE_QUALITY:
-            row_status = COVERAGE_ASSURANCE
-            notes_parts.append("Addressed through standards, design assurance, and PM controls.")
-
-        elif classification == SCOPE_GOVERNANCE_APPROVAL:
-            gov_evidence = _find_governance_evidence(scope_text, ordered_programme_activities)
-            if gov_evidence:
-                row_status = COVERAGE_IMPLICIT
-                programme_evidence = list(gov_evidence)
-                notes_parts.append("Milestones, approval activities, or review steps are shown in the programme.")
-            else:
-                row_status = COVERAGE_IMPLICIT
-                notes_parts.append("This obligation is typically managed through governance rather than programme logic.")
-
-        else:
-            # ACTIVITY_DELIVERABLE: distinguish explicit (exact match) vs implicit (token-overlap) coverage
-            evidence: List[str] = []
-            basis_set: set = set()
-            expl_set: set = set()
-            exact_match = canonical in matched_map
-            if exact_match:
-                evidence = list(matched_map[canonical]["activities"])
-                basis_set = matched_map[canonical]["basis"]
-                expl_set = matched_map[canonical]["explanations"]
-            if not evidence:
-                scope_tokens = _tokenise(scope_text)
-                for req_key, data in matched_map.items():
-                    req_tokens = _tokenise(req_key)
-                    if scope_tokens & req_tokens:
-                        evidence.extend(data["activities"])
-                        basis_set |= data["basis"]
-                        expl_set |= data["explanations"]
-                evidence = sorted(set(evidence))
-
-            if evidence:
-                row_status = COVERAGE_EXPLICIT if exact_match else COVERAGE_IMPLICIT
-                programme_evidence = evidence
-                basis = ", ".join(sorted(basis_set)) or "semantic intent"
-                explanation = "; ".join(sorted(expl_set))
-                notes_parts.append(f"Match recorded on a {basis} basis.")
-                if explanation:
-                    notes_parts.append(explanation)
-            elif canonical in missing_map:
-                row_status = COVERAGE_NONE
-                notes_parts.append(missing_map[canonical] or "No programme activity recorded for this obligation.")
-            else:
-                row_status = COVERAGE_NONE
-                notes_parts.append("No programme activity recorded for this obligation.")
-
-        # Confidence band: descriptive only; does not affect acceptability.
-        if row_status == COVERAGE_EXPLICIT:
-            confidence_band = CONFIDENCE_HIGH
-        elif row_status in (COVERAGE_IMPLICIT, COVERAGE_ASSURANCE):
-            confidence_band = CONFIDENCE_MODERATE
-        else:
-            confidence_band = CONFIDENCE_JUDGEMENT_REQUIRED
-
-        scope_rows.append({
-            "contract_scope": scope_text,
-            "programme_activities": list(programme_evidence),
-            "representation_status": row_status,
-            "evidence_role": evidence_role,
-            "notes": " ".join(notes_parts).strip(),
-            "confidence_band": confidence_band,
-        })
-
-    # Activity load transparency: count how many scope obligations each programme activity supports
-    activity_load: Dict[str, int] = defaultdict(int)
-    for row in scope_rows:
-        for act in row.get("programme_activities", []) or []:
-            if act:
-                activity_load[str(act)] += 1
-    activity_load_notes: List[str] = []
-    for act, count in sorted(activity_load.items(), key=lambda x: -x[1]):
-        if count > ACTIVITY_LOAD_THRESHOLD:
-            activity_load_notes.append(
-                f'"{act}" supports several contract requirements and may benefit from additional programme detail as the project develops.'
-            )
-
-    scope_counts = Counter(row["representation_status"] for row in scope_rows)
-    if scope_items:
-        parts: List[str] = []
-        for label in (COVERAGE_EXPLICIT, COVERAGE_IMPLICIT, COVERAGE_ASSURANCE, COVERAGE_NONE):
-            if scope_counts.get(label):
-                parts.append(f"{scope_counts[label]} {label.lower()}")
-        scope_summary = (
-            "This assessment is based on the actual contract scope and the actual activities in the submitted programme, as listed above. "
-            "Not all contract scope items are expected to appear as individual programme activities; some relate to quality, compliance, or assurance and are normally managed through standards, reviews, and controls."
-        )
-        if parts:
-            scope_summary += " " + "; ".join(parts) + "."
-    else:
-        scope_summary = "No scope items were extracted from the contract; confirm scope alignment manually."
-
-    # Constraint coverage: use direct evidence from programme activities (ordered_programme_activities already built above).
     constraint_rows: List[Dict[str, Any]] = []
-    for constraint_text in constraints:
-        evidence: List[str] = []
-        lower_constraint = constraint_text.lower()
-        for activity_name in ordered_programme_activities:
-            if lower_constraint in activity_name.lower():
-                evidence.append(activity_name)
-        if not evidence:
-            constraint_tokens = _tokenise(constraint_text)
-            if constraint_tokens:
-                for activity_name in ordered_programme_activities:
-                    if _tokenise(activity_name) & constraint_tokens:
-                        evidence.append(activity_name)
-        evidence = sorted(set(evidence))
-        if evidence:
-            handling = "Explicit in programme"
-            programme_evidence = ", ".join(evidence[:3]) + ("…" if len(evidence) > 3 else "")
-            confidence_band = CONFIDENCE_HIGH
-        else:
-            handling = "Implicitly managed"
-            programme_evidence = "— (managed through general site controls)"
-            confidence_band = CONFIDENCE_MODERATE
-        constraint_rows.append({
-            "constraint": constraint_text,
-            "programme_evidence": programme_evidence,
-            "handling": handling,
-            "evidence_role": "Constraint alignment",
-            "confidence_band": confidence_band,
-        })
+    scope_summary = ""
+    activity_load_notes: List[str] = []
 
-    explicit_constraints = sum(1 for row in constraint_rows if row["handling"] == "Explicit in programme")
-    implicit_constraints = len(constraint_rows) - explicit_constraints
-    if constraints:
+    if obligation_entities_used:
+        # HARD RULE: Scope and constraints reporting MUST be derived ONLY from obligation_entities. No legacy scope_items, no PCM, no implicit/assurance/confidence language from legacy engine.
+        scope_evidence_table = _safe_list(_safe_get(scope_coverage, "scope_evidence_table"))
+        for row in scope_evidence_table:
+            r = _safe_dict(row)
+            scope_rows.append({
+                "contract_scope": r.get("text") or r.get("original_contract_text", ""),
+                "programme_activities": list(r.get("evidence_activity_ids") or [])[:20],
+                "representation_status": r.get("representation_status_label") or r.get("representation_status", ""),
+                "evidence_role": "Scope alignment",
+                "notes": r.get("evidence_sufficient_reason") or "",
+                "confidence_band": "From obligation alignment",
+            })
+        constraints_control = _safe_list(_safe_get(scope_coverage, "constraints_control"))
+        for row in constraints_control:
+            r = _safe_dict(row)
+            constraint_rows.append({
+                "constraint": r.get("original_contract_text", ""),
+                "programme_evidence": "Evidenced in programme constraints or sequencing." if r.get("acknowledged") else "—",
+                "handling": "Explicit in programme" if r.get("acknowledged") else "Implicitly managed",
+                "evidence_role": "Constraint alignment",
+                "confidence_band": "From obligation alignment",
+            })
+        scope_summary = (
+            "Scope and constraints are assessed from obligation alignment only. "
+            "The table above reflects evidenced, explicit assumption, not represented but mandatory, and assurance-based obligations. "
+            "No legacy scope_items or confidence-based labels are used when obligation entities are present."
+        )
+        if not scope_rows and not constraint_rows:
+            scope_summary = "Obligation-based scope coverage: no scope or constraint obligations in this report subset."
         constraint_summary = (
-            "This assessment is based on the actual constraints identified in the contract and the programme activities shown above. "
-            f"{explicit_constraints} constraint(s) are explicitly named in the programme; {implicit_constraints} rely on implicit management or operational controls."
+            "Constraints are assessed from obligation alignment (constraints_control)."
+            if constraint_rows else "No constraint obligations in this report subset."
         )
     else:
-        constraint_summary = "No explicit contract constraints were extracted; confirm how constraints are managed."
+        # Legacy path: scope_items + PCM (no obligation_entities)
+        scope_items = _extract_text_list(_safe_get(cs, "scope_items") or [])
+        constraints = _extract_text_list(_safe_get(cs, "constraints") or [])
+
+        required = _safe_dict(_safe_get(_safe_dict(pcm), "required_activities"))
+        entries = _safe_list(_safe_get(required, "entries"))
+        matched_map: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"activities": set(), "basis": set(), "explanations": set()})
+        missing_map: Dict[str, str] = {}
+        for entry in entries:
+            ent = _safe_dict(entry) if not isinstance(entry, dict) else entry
+            key = _canonical_text(_safe_str(_safe_get(ent, "requirement")))
+            if not key:
+                continue
+            status = _safe_get(ent, "status")
+            if status == "FOUND":
+                mpa = _safe_get(ent, "matched_programme_activities")
+                activities_list = mpa if isinstance(mpa, list) else [mpa] if mpa else []
+                for act in activities_list:
+                    if act:
+                        matched_map[key]["activities"].add(str(act))
+                basis = _safe_get(ent, "matching_basis")
+                if basis:
+                    matched_map[key]["basis"].add(str(basis))
+                expl = _safe_get(ent, "matching_explanation")
+                if expl:
+                    matched_map[key]["explanations"].add(str(expl))
+            else:
+                if key not in missing_map:
+                    missing_map[key] = _safe_str(_safe_get(ent, "matching_explanation"), "No programme activity recorded for this obligation.")
+
+        ps = _safe_dict(programme_summary)
+        programme_activities = []
+        for item in _safe_list(_safe_get(ps, "activities")):
+            it = _safe_dict(item) if not isinstance(item, dict) else item
+            name = _safe_get(it, "name") or _safe_get(it, "task_name") or _safe_get(it, "activity_name")
+            if name:
+                programme_activities.append(str(name).strip())
+        for item in _safe_list(_safe_get(ps, "critical_path")):
+            it = _safe_dict(item) if not isinstance(item, dict) else item
+            name = _safe_get(it, "name")
+            if name:
+                programme_activities.append(str(name).strip())
+        seen = set()
+        ordered_programme_activities = []
+        for name in programme_activities:
+            if name and name not in seen:
+                ordered_programme_activities.append(name)
+                seen.add(name)
+
+        for scope_text in scope_items:
+            canonical = _canonical_text(scope_text)
+            classification = _classify_scope_item(scope_text)
+            row_status: str
+            programme_evidence: List[str] = []
+            notes_parts: List[str] = []
+
+            evidence_role = "Scope alignment"
+
+            if classification == SCOPE_ASSURANCE_QUALITY:
+                row_status = COVERAGE_ASSURANCE
+                notes_parts.append("Addressed through standards, design assurance, and PM controls.")
+
+            elif classification == SCOPE_GOVERNANCE_APPROVAL:
+                gov_evidence = _find_governance_evidence(scope_text, ordered_programme_activities)
+                if gov_evidence:
+                    row_status = COVERAGE_IMPLICIT
+                    programme_evidence = list(gov_evidence)
+                    notes_parts.append("Milestones, approval activities, or review steps are shown in the programme.")
+                else:
+                    row_status = COVERAGE_IMPLICIT
+                    notes_parts.append("This obligation is typically managed through governance rather than programme logic.")
+
+            else:
+                # ACTIVITY_DELIVERABLE: distinguish explicit (exact match) vs implicit (token-overlap) coverage
+                evidence: List[str] = []
+                basis_set: set = set()
+                expl_set: set = set()
+                exact_match = canonical in matched_map
+                if exact_match:
+                    evidence = list(matched_map[canonical]["activities"])
+                    basis_set = matched_map[canonical]["basis"]
+                    expl_set = matched_map[canonical]["explanations"]
+                if not evidence:
+                    scope_tokens = _tokenise(scope_text)
+                    for req_key, data in matched_map.items():
+                        req_tokens = _tokenise(req_key)
+                        if scope_tokens & req_tokens:
+                            evidence.extend(data["activities"])
+                            basis_set |= data["basis"]
+                            expl_set |= data["explanations"]
+                    evidence = sorted(set(evidence))
+
+                if evidence:
+                    row_status = COVERAGE_EXPLICIT if exact_match else COVERAGE_IMPLICIT
+                    programme_evidence = evidence
+                    basis = ", ".join(sorted(basis_set)) or "semantic intent"
+                    explanation = "; ".join(sorted(expl_set))
+                    notes_parts.append(f"Match recorded on a {basis} basis.")
+                    if explanation:
+                        notes_parts.append(explanation)
+                elif canonical in missing_map:
+                    row_status = COVERAGE_NONE
+                    notes_parts.append(missing_map[canonical] or "No programme activity recorded for this obligation.")
+                else:
+                    row_status = COVERAGE_NONE
+                    notes_parts.append("No programme activity recorded for this obligation.")
+
+            # Confidence band: descriptive only; does not affect acceptability.
+            if row_status == COVERAGE_EXPLICIT:
+                confidence_band = CONFIDENCE_HIGH
+            elif row_status in (COVERAGE_IMPLICIT, COVERAGE_ASSURANCE):
+                confidence_band = CONFIDENCE_MODERATE
+            else:
+                confidence_band = CONFIDENCE_JUDGEMENT_REQUIRED
+
+            scope_rows.append({
+                "contract_scope": scope_text,
+                "programme_activities": list(programme_evidence),
+                "representation_status": row_status,
+                "evidence_role": evidence_role,
+                "notes": " ".join(notes_parts).strip(),
+                "confidence_band": confidence_band,
+            })
+
+        # Activity load transparency: count how many scope obligations each programme activity supports
+        activity_load: Dict[str, int] = defaultdict(int)
+        for row in scope_rows:
+            for act in row.get("programme_activities", []) or []:
+                if act:
+                    activity_load[str(act)] += 1
+        activity_load_notes: List[str] = []
+        for act, count in sorted(activity_load.items(), key=lambda x: -x[1]):
+            if count > ACTIVITY_LOAD_THRESHOLD:
+                activity_load_notes.append(
+                    f'"{act}" supports several contract requirements and may benefit from additional programme detail as the project develops.'
+                )
+
+        scope_counts = Counter(row["representation_status"] for row in scope_rows)
+        if scope_items:
+            parts: List[str] = []
+            for label in (COVERAGE_EXPLICIT, COVERAGE_IMPLICIT, COVERAGE_ASSURANCE, COVERAGE_NONE):
+                if scope_counts.get(label):
+                    parts.append(f"{scope_counts[label]} {label.lower()}")
+            scope_summary = (
+                "This assessment is based on the actual contract scope and the actual activities in the submitted programme, as listed above. "
+                "Not all contract scope items are expected to appear as individual programme activities; some relate to quality, compliance, or assurance and are normally managed through standards, reviews, and controls."
+            )
+            if parts:
+                scope_summary += " " + "; ".join(parts) + "."
+        else:
+            scope_summary = "No scope items were extracted from the contract; confirm scope alignment manually."
+
+        # Constraint coverage: use direct evidence from programme activities (ordered_programme_activities already built above).
+        constraint_rows: List[Dict[str, Any]] = []
+        for constraint_text in constraints:
+            evidence: List[str] = []
+            lower_constraint = constraint_text.lower()
+            for activity_name in ordered_programme_activities:
+                if lower_constraint in activity_name.lower():
+                    evidence.append(activity_name)
+            if not evidence:
+                constraint_tokens = _tokenise(constraint_text)
+                if constraint_tokens:
+                    for activity_name in ordered_programme_activities:
+                        if _tokenise(activity_name) & constraint_tokens:
+                            evidence.append(activity_name)
+            evidence = sorted(set(evidence))
+            if evidence:
+                handling = "Explicit in programme"
+                programme_evidence = ", ".join(evidence[:3]) + ("…" if len(evidence) > 3 else "")
+                confidence_band = CONFIDENCE_HIGH
+            else:
+                handling = "Implicitly managed"
+                programme_evidence = "— (managed through general site controls)"
+                confidence_band = CONFIDENCE_MODERATE
+            constraint_rows.append({
+                "constraint": constraint_text,
+                "programme_evidence": programme_evidence,
+                "handling": handling,
+                "evidence_role": "Constraint alignment",
+                "confidence_band": confidence_band,
+            })
+
+        explicit_constraints = sum(1 for row in constraint_rows if row["handling"] == "Explicit in programme")
+        implicit_constraints = len(constraint_rows) - explicit_constraints
+        if constraints:
+            constraint_summary = (
+                "This assessment is based on the actual constraints identified in the contract and the programme activities shown above. "
+                f"{explicit_constraints} constraint(s) are explicitly named in the programme; {implicit_constraints} rely on implicit management or operational controls."
+            )
+        else:
+            constraint_summary = "No explicit contract constraints were extracted; confirm how constraints are managed."
 
     # Report reflects validator result exactly. Do not recalculate or soften acceptability.
     vs = _safe_dict(validation_summary)
@@ -641,6 +686,15 @@ def _section_scope_contract_alignment(
                 "Report contradiction: cannot output 'acceptable' while mandatory obligations are not represented. "
                 "obligations_not_represented_but_mandatory is non-empty. Refusing to generate report."
             )
+        # Tripwire: scope rows must not show "Not represented but mandatory" when status is ACCEPTABLE (single source of truth).
+        if _safe_get(scope_coverage, "obligation_entities_used"):
+            for row in scope_rows:
+                rs = (row.get("representation_status") or "").strip()
+                if rs == "Not represented but mandatory":
+                    raise RuntimeError(
+                        "Report contradiction: acceptability is ACCEPTABLE but a scope_row has representation_status "
+                        "'Not represented but mandatory'. Scope and acceptability must not contradict."
+                    )
         acceptability_clarification = (
             "The programme aligns with the contract scope and constraints and is acceptable at this stage."
         )
@@ -696,6 +750,10 @@ def _section_scope_contract_alignment(
                 obligations_not_represented_but_mandatory_list.append({
                     "id": _safe_str(_safe_get(o, "id")),
                     "text": _safe_str(_safe_get(o, "original_contract_text"))[:120] + ("…" if len(_safe_str(_safe_get(o, "original_contract_text"))) > 120 else ""),
+                    "obligation_name": _safe_str(_safe_get(o, "canonical_name")) or _safe_str(_safe_get(o, "original_contract_text")),
+                    "evidence_mode": _safe_str(_safe_get(o, "evidence_mode"), "PHRASE"),
+                    "canonical_match_string": _safe_str(_safe_get(o, "canonical_match_string")),
+                    "required_action": _safe_str(_safe_get(o, "required_action")),
                 })
         for ob in _safe_list(_safe_get(scope_coverage, "obligations_assurance_based")):
             o = _safe_dict(ob)
