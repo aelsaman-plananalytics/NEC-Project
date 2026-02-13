@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { apiDeleteAllRuns, apiExportRuns } from '../services/api';
+import { useToast } from '../context/ToastContext';
+import { apiDeleteAllRuns, apiExportRuns, apiResendVerification } from '../services/api';
 
 const ROLES = [
   { value: 'Client', label: 'Client' },
@@ -34,6 +35,7 @@ const REPORT_FORMAT_OPTIONS = [
 
 export default function AccountSettings() {
   const { user, updateProfile } = useAuth();
+  const { addToast } = useToast();
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const [profile, setProfile] = useState({
@@ -60,6 +62,8 @@ export default function AccountSettings() {
   const [dataRetentionDays, setDataRetentionDays] = useState(365);
   const [dataAction, setDataAction] = useState({ type: null, loading: false, message: '' });
   const [activeTab, setActiveTab] = useState('profile');
+  const [resendVerificationMessage, setResendVerificationMessage] = useState('');
+  const [resendVerificationLoading, setResendVerificationLoading] = useState(false);
 
   const TABS = [
     { id: 'profile', label: 'Profile & organisation' },
@@ -180,6 +184,43 @@ export default function AccountSettings() {
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
               <p className="text-slate-600">{user.email}</p>
+            </div>
+            <div>
+              <span className="block text-sm font-medium text-slate-700 mb-1">Email verification</span>
+              {user.isVerified ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800">
+                  Verified
+                </span>
+              ) : (
+                <>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800 mb-2">
+                    Not verified
+                  </span>
+                  <p className="text-slate-600 text-sm mb-2">Verify your email to access all features.</p>
+                  <button
+                    type="button"
+                    disabled={resendVerificationLoading}
+                    onClick={async () => {
+                      setResendVerificationMessage('');
+                      setResendVerificationLoading(true);
+                      try {
+                        const data = await apiResendVerification(user.email);
+                        addToast({ type: 'success', message: data.message || 'Verification email sent.' });
+                      } catch (err) {
+                        setResendVerificationMessage(err.message || 'Failed to resend.');
+                      } finally {
+                        setResendVerificationLoading(false);
+                      }
+                    }}
+                    className="text-sm font-medium text-amber-600 hover:text-amber-700 disabled:opacity-50 transition-colors"
+                  >
+                    {resendVerificationLoading ? 'Sending…' : 'Resend verification email'}
+                  </button>
+                  {resendVerificationMessage && (
+                    <p className="mt-2 text-sm text-red-600" role="alert">{resendVerificationMessage}</p>
+                  )}
+                </>
+              )}
             </div>
             <div>
               <label htmlFor="acc-name" className="block text-sm font-medium text-slate-700 mb-1">Name</label>

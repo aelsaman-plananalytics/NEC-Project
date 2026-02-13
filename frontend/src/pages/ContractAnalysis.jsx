@@ -8,7 +8,7 @@ const STAGE_REVIEW = 'review';
 
 export default function ContractAnalysis() {
   const navigate = useNavigate();
-  const { setContractAnalysis, contractAnalysis, contractFile, setStage, resetPipeline } = usePipeline();
+  const { setContractAnalysis, contractAnalysis, setStage, resetPipeline } = usePipeline();
   const [stage, setLocalStage] = useState(contractAnalysis ? STAGE_REVIEW : STAGE_UPLOAD);
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);

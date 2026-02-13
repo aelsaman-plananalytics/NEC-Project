@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Literal
 
+from app.persistence.integrity import compute_record_hash
+
 AcceptanceDecision = Literal["ACCEPT", "NOT_ACCEPT", "ACCEPT_WITH_COMMENTS"]
 
 VALID_DECISIONS: frozenset = frozenset({"ACCEPT", "NOT_ACCEPT", "ACCEPT_WITH_COMMENTS"})
@@ -38,7 +40,7 @@ def create_acceptance_record(
                 "Acceptance decision ACCEPT_WITH_COMMENTS requires non-empty comments."
             )
     decided_by = (decided_by or "").strip()
-    return {
+    record = {
         "acceptance_id": acceptance_id or str(uuid.uuid4()),
         "submission_id": submission_id,
         "project_id": project_id,
@@ -47,3 +49,5 @@ def create_acceptance_record(
         "decided_by": decided_by,
         "decided_at": datetime.now(timezone.utc).isoformat(),
     }
+    record["record_hash"] = compute_record_hash(record)
+    return record

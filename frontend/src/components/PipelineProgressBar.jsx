@@ -1,6 +1,5 @@
 import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { usePipeline } from '../context/PipelineContext';
 
 const STEPS = [
   { path: '/analysis', label: 'Contract analysis', stage: 1 },

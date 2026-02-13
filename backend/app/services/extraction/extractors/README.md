@@ -1,46 +1,43 @@
-# NEC Contract Ingestion Engine
+# NEC Contract Extractors
 
-Complete structured extraction pipeline for NEC contract documents.
+Table extraction, clause parsing, and contract data models for NEC documents.
 
 ## Overview
 
-This module provides a comprehensive contract ingestion system that extracts:
+This module provides:
 - **Tables** (Schedule of Drawings, Series tables) using Camelot, pdfplumber, and OCR
 - **Structured clauses** (Part 1 sections 1-9, Part 2 contractor data)
 - **Contract data fields** (Employer, Project Manager, Payment terms, etc.)
-- **Fully structured JSON** matching the NEC contract model
+- **Data models** for NEC contract structure (Part 1, Part 2, Drawings, etc.)
+
+The former **Contract Ingestion Engine** and **POST /api/ingest_contract** endpoint were removed; contract analysis uses the main **analyze_contract** pipeline (contract_parser + extraction core) instead.
 
 ## Architecture
 
 ### Core Modules
 
-1. **`contract_ingestion_engine.py`**
-   - Main orchestrator
-   - Coordinates table extraction, text extraction, clause parsing
-   - Builds final structured JSON contract model
-
-2. **`table_extractor.py`**
+1. **`table_extractor.py`**
    - Hybrid table extraction (Camelot → pdfplumber → OCR)
    - Handles vector-based PDFs, image-based PDFs, and scanned documents
    - Parses Schedule of Drawings tables
 
-3. **`clause_parser.py`**
+2. **`clause_parser.py`**
    - Detects clause structure (main sections, subclauses)
    - Extracts Part 1 sections (1-9)
    - Extracts Part 2 contractor data
    - Parses Works Description, Payment terms, Time sections
 
-4. **`nec_contract_model.py`**
+3. **`nec_contract_model.py`**
    - Dataclasses for structured contract representation
    - Part 1, Part 2, Drawings, Risks, Insurance models
    - JSON serialization support
 
-5. **`utils_pdf.py`**
+4. **`utils_pdf.py`**
    - PDF page type detection (vector/image/mixed)
    - Text extraction utilities
    - Table detection helpers
 
-6. **`utils_cleaning.py`**
+5. **`utils_cleaning.py`**
    - OCR noise removal
    - Header/footer removal
    - Hyphenated line break fixing
@@ -48,29 +45,9 @@ This module provides a comprehensive contract ingestion system that extracts:
 
 ## Usage
 
-### Basic Usage
+Use **TableExtractor**, **ClauseParser**, and the **nec_contract_model** types from this package as needed. Contract analysis is performed by the main app via **POST /api/v1/analyze_contract** (see contract_parser and extraction core).
 
-```python
-from app.services.extraction.extractors import ContractIngestionEngine
-
-engine = ContractIngestionEngine()
-result = engine.ingest_contract("contract.pdf")
-
-# Result is a fully structured dictionary matching NEC contract model
-print(result["contract"]["part_1"]["1_general"]["1.2_works_description"])
-```
-
-### API Endpoint
-
-The ingestion engine is available via the FastAPI endpoint:
-
-```
-POST /api/ingest_contract
-```
-
-Upload a PDF file and receive fully structured JSON response.
-
-## Output Format
+## Output Format (nec_contract_model)
 
 The output matches the exact NEC contract model structure:
 
@@ -122,13 +99,6 @@ Required packages:
 Install with:
 ```bash
 pip install camelot-py[cv] pdfplumber pytesseract pdf2image pandas Pillow
-```
-
-## Testing
-
-Run tests with:
-```bash
-pytest app/services/extraction/extractors/tests/test_ingestion_engine.py -vv
 ```
 
 ## Notes

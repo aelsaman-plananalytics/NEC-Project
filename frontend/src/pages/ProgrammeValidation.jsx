@@ -1,14 +1,23 @@
 import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { usePipeline } from '../context/PipelineContext';
-import { validateProgramme } from '../services/api';
+import { useAuth } from '../context/AuthContext';
+import { useToast } from '../context/ToastContext';
+import { validateProgramme, parseApiError } from '../services/api';
+import ErrorModal from '../components/ErrorModal';
+import Spinner from '../components/Spinner';
 
 export default function ProgrammeValidation() {
   const navigate = useNavigate();
-  const { contractAnalysis, setValidationResult, setStage, contractFile } = usePipeline();
+  const { handleUnauthorized } = useAuth();
+  const { addToast } = useToast();
+  const { contractAnalysis, setValidationResult, setStage, contractFile, addToHistory } = usePipeline();
   const [file, setFile] = useState(null);
+  const [previousFile, setPreviousFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [errorCode, setErrorCode] = useState(null);
+  const [errorDetails, setErrorDetails] = useState(null);
   const [dragActive, setDragActive] = useState(false);
 
   const handleValidate = useCallback(async () => {
@@ -19,17 +28,43 @@ export default function ProgrammeValidation() {
     }
     setLoading(true);
     setError('');
+    setErrorCode(null);
+    setErrorDetails(null);
     try {
-      const result = await validateProgramme(file, contractAnalysis);
+      const result = await validateProgramme(file, contractAnalysis, previousFile || undefined);
       setValidationResult(result, file);
       setStage(3);
+      if (result.run_id && addToHistory) {
+        addToHistory({
+          contractName: contractFile?.name || contractAnalysis?.project,
+          programmeName: file?.name ?? null,
+          validationResult: true,
+          runId: result.run_id,
+        });
+      }
+      addToast({ type: 'success', message: 'Validation complete. Review the summary below.' });
       navigate('/review');
     } catch (err) {
-      setError(err.message || 'We couldn’t process the programme file. Please check it is a valid XER file and try again.');
+      if (err.errorCode === 'UNAUTHORIZED' && handleUnauthorized) {
+        handleUnauthorized();
+        return;
+      }
+      const parsed = parseApiError({
+        error_code: err.errorCode,
+        error_message: err.message,
+        details: err.details,
+      });
+      setError(parsed.userMessage);
+      setErrorCode(parsed.errorCode || null);
+      setErrorDetails(parsed.details ?? null);
+      const toastCodes = ['PLAN_LIMIT_EXCEEDED', 'VALIDATION_TIMEOUT', 'RATE_LIMIT_EXCEEDED'];
+      if (toastCodes.includes(parsed.errorCode)) {
+        addToast({ type: 'error', message: parsed.userMessage });
+      }
     } finally {
       setLoading(false);
     }
-  }, [file, contractAnalysis, setValidationResult, setStage, navigate]);
+  }, [file, previousFile, contractAnalysis, setValidationResult, setStage, navigate, contractFile, addToHistory, handleUnauthorized, addToast]);
 
   if (!contractAnalysis) {
     navigate('/analysis', { replace: true });
@@ -62,6 +97,19 @@ export default function ProgrammeValidation() {
       setError('');
     } else if (f) {
       setError('Please upload a valid XER file (Primavera P6 programme).');
+    }
+  };
+
+  const handlePreviousFileChange = (e) => {
+    const f = e.target?.files?.[0];
+    if (!f) {
+      setPreviousFile(null);
+      return;
+    }
+    if (f.name.toLowerCase().endsWith('.xer')) {
+      setPreviousFile(f);
+    } else {
+      setPreviousFile(null);
     }
   };
 
@@ -98,16 +146,47 @@ export default function ProgrammeValidation() {
             Selected: <strong>{file.name}</strong>
           </p>
         )}
+        <div className="mt-6 pt-6 border-t border-slate-200">
+          <label className="block text-sm font-medium text-slate-700 mb-2">
+            Compare with previous programme (optional XER)
+          </label>
+          <p className="text-slate-500 text-sm mb-2">
+            Upload a previous XER to see what changed (obligations became aligned/unaligned).
+          </p>
+          <input
+            type="file"
+            id="previous-programme-upload"
+            accept=".xer"
+            onChange={handlePreviousFileChange}
+            className="block w-full text-sm text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-slate-700 file:bg-slate-100 hover:file:bg-slate-200"
+          />
+          {previousFile && (
+            <p className="mt-2 text-sm text-slate-600">Previous: <strong>{previousFile.name}</strong></p>
+          )}
+        </div>
         {error && (
           <div className="mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm">
             {error}
+          </div>
+        )}
+        {errorCode && (
+          <ErrorModal
+            errorCode={errorCode}
+            message={error}
+            details={errorDetails}
+            onClose={() => { setErrorCode(null); setErrorDetails(null); setError(''); }}
+          />
+        )}
+        {loading && (
+          <div className="mt-4 flex justify-center">
+            <Spinner label="Validating programme…" className="min-h-0 py-4" />
           </div>
         )}
         <button
           type="button"
           disabled={!file || loading}
           onClick={handleValidate}
-          className="mt-6 w-full py-3 rounded-lg bg-amber-500 text-slate-900 font-semibold hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="mt-6 w-full py-3 rounded-lg bg-amber-500 text-slate-900 font-semibold hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {loading ? 'Validating programme…' : 'Validate programme'}
         </button>

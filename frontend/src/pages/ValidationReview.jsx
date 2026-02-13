@@ -1,14 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { usePipeline } from '../context/PipelineContext';
-import { useAuth } from '../context/AuthContext';
 import { buildValidationReport } from '../services/api';
 import EvidencePanel from '../components/EvidencePanel';
 import ConfidenceLegend from '../components/ConfidenceLegend';
+import Spinner from '../components/Spinner';
 
 export default function ValidationReview() {
   const navigate = useNavigate();
-  const { user } = useAuth();
   const {
     validationResult,
     proceedToReport,
@@ -47,15 +46,14 @@ export default function ValidationReview() {
       });
   }, [validationResult, userConfirmations]);
 
-  const sectionScopeForMemo = builtReport?.section_scope_contract_alignment;
-  const sectionDForMemo = builtReport?.section_d_required_activities_and_gates;
-  const scopeRowsForMemo = Array.isArray(sectionScopeForMemo?.scope_rows) ? sectionScopeForMemo.scope_rows : [];
-  const requiredTableForMemo = Array.isArray(sectionDForMemo?.required_activities_table) ? sectionDForMemo.required_activities_table : [];
-
   const { activityToObligations, obligationToActivities } = useMemo(() => {
+    const sectionScope = builtReport?.section_scope_contract_alignment;
+    const sectionD = builtReport?.section_d_required_activities_and_gates;
+    const scopeRows = Array.isArray(sectionScope?.scope_rows) ? sectionScope.scope_rows : [];
+    const requiredTable = Array.isArray(sectionD?.required_activities_table) ? sectionD.required_activities_table : [];
     const actToOb = new Map();
     const obToAct = new Map();
-    scopeRowsForMemo.forEach((row) => {
+    scopeRows.forEach((row) => {
       const ob = row.contract_scope || row.constraint;
       const acts = row.programme_activities || [];
       if (ob) {
@@ -66,7 +64,7 @@ export default function ValidationReview() {
         });
       }
     });
-    requiredTableForMemo.forEach((row) => {
+    requiredTable.forEach((row) => {
       const ob = row.contract_activity;
       const notes = row.notes || '';
       const match = notes.match(/Shown as:\s*([^.]+)/);
@@ -79,7 +77,7 @@ export default function ValidationReview() {
       }
     });
     return { activityToObligations: actToOb, obligationToActivities: obToAct };
-  }, [scopeRowsForMemo, requiredTableForMemo]);
+  }, [builtReport]);
 
   if (!validationResult) {
     navigate('/programme', { replace: true });
@@ -100,7 +98,7 @@ export default function ValidationReview() {
     return (
       <div className="max-w-3xl mx-auto px-4 py-8">
         <h1 className="font-heading text-2xl font-bold text-slate-900 mb-2">Validation review</h1>
-        <p className="text-slate-600">Building preview from the same data as your report…</p>
+        <Spinner label="Building preview from the same data as your report…" />
       </div>
     );
   }

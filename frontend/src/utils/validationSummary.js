@@ -2,11 +2,23 @@
  * Map validation API response to human-readable summary (no raw JSON, no technical terms).
  */
 
+/** Normalise item for display: string → string; object → text ?? message ?? reason ?? "—"; never String(object). */
+export function normaliseText(item) {
+  if (item == null) return '—';
+  if (typeof item === 'string') return item.trim() || '—';
+  if (typeof item === 'object') {
+    const s = item.text ?? item.message ?? item.reason ?? null;
+    return s != null ? String(s).trim() || '—' : '—';
+  }
+  return '—';
+}
+
+/** Humanize backend acceptability; never show raw enum. */
 export function getAcceptabilityLabel(status) {
   if (!status) return 'Not determined';
   const s = String(status).toUpperCase();
-  if (s === 'ACCEPTABLE') return 'Acceptable';
-  if (s === 'NOT ACCEPTABLE') return 'Not acceptable at this stage';
+  if (s === 'ACCEPTABLE') return 'Acceptable at this stage';
+  if (s === 'NOT ACCEPTABLE' || s === 'NOT_ACCEPTABLE') return 'Not acceptable at this stage';
   return status;
 }
 
@@ -22,12 +34,11 @@ export function getOverallStatusLabel(status) {
 export function buildValidationPreview(validationResult) {
   const vs = validationResult?.validation_summary || {};
   const alignment = validationResult?.alignment || {};
-  const contractSummary = validationResult?.contract_summary || {};
-  const programmeSummary = validationResult?.programme_summary || {};
   const pcm = alignment?.programme_compliance_model || {};
   const rawRequired = pcm.required_activities;
   const requiredActivities = Array.isArray(rawRequired) ? rawRequired : (rawRequired && typeof rawRequired === 'object' ? Object.values(rawRequired) : []);
-  const failureReasons = Array.isArray(vs.acceptability_failure_reasons) ? vs.acceptability_failure_reasons : [];
+  const rawFailureReasons = Array.isArray(vs.acceptability_failure_reasons) ? vs.acceptability_failure_reasons : [];
+  const failureReasons = rawFailureReasons.map(normaliseText);
   const decisionText = vs.programme_decision_text || vs.programme_decision_detail || '';
   const decisionDetail = vs.programme_decision_detail || '';
 
@@ -55,8 +66,10 @@ export function buildValidationPreview(validationResult) {
 
 export function buildResultsForReport(validationResult) {
   const vs = validationResult?.validation_summary || {};
-  const failureReasons = Array.isArray(vs.acceptability_failure_reasons) ? vs.acceptability_failure_reasons : [];
-  const recommendations = Array.isArray(validationResult?.recommendations) ? validationResult.recommendations : [];
+  const rawFailureReasons = Array.isArray(vs.acceptability_failure_reasons) ? vs.acceptability_failure_reasons : [];
+  const rawRecommendations = Array.isArray(validationResult?.recommendations) ? validationResult.recommendations : [];
+  const failureReasons = rawFailureReasons.map(normaliseText);
+  const requiredActions = rawRecommendations.map(normaliseText);
 
   return {
     acceptabilityStatus: getAcceptabilityLabel(vs.acceptability_status),
@@ -64,7 +77,7 @@ export function buildResultsForReport(validationResult) {
     programmeDecisionDetail: vs.programme_decision_detail || '',
     qualitySummary: vs.quality_summary || '',
     failureReasons,
-    requiredActions: recommendations,
+    requiredActions,
     summaryExplanation: vs.summary_explanation || '',
   };
 }

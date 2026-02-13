@@ -13,7 +13,9 @@ router = APIRouter(
 )
 
 
-@router.post("/full_review")
+# Deprecated: use POST /api/v1/full_review. Kept for backward compatibility.
+@router.post("/full_review", deprecated=True, include_in_schema=False)
+@router.post("/v1/full_review")
 async def full_review(
     contract_file: UploadFile = File(..., description="NEC contract (PDF)"),
     programme_file: UploadFile = File(..., description="Primavera P6 programme (XER)"),

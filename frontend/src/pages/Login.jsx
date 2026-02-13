@@ -1,17 +1,21 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { apiResendVerification } from '../services/api';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [emailNotVerified, setEmailNotVerified] = useState(false);
+  const [resendMessage, setResendMessage] = useState('');
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const from = location.state?.from || '/dashboard';
   const fromSignup = location.state?.fromSignup === true;
+  const signupMessage = location.state?.signupMessage || '';
 
   const isValidEmail = (value) => {
     const trimmed = (value || '').trim();
@@ -28,6 +32,8 @@ export default function Login() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setEmailNotVerified(false);
+    setResendMessage('');
     if (!isValidEmail(email)) {
       setError('Please enter a valid email address.');
       return;
@@ -38,8 +44,24 @@ export default function Login() {
       navigate(from, { replace: true });
     } catch (err) {
       setError(err.message || 'Login failed.');
+      if (err.errorCode === 'EMAIL_NOT_VERIFIED') setEmailNotVerified(true);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    const addr = email.trim().toLowerCase();
+    if (!addr) {
+      setResendMessage('Enter your email above first.');
+      return;
+    }
+    setResendMessage('');
+    try {
+      const data = await apiResendVerification(addr);
+      setResendMessage(data.message || 'Verification email sent. Check your inbox.');
+    } catch (err) {
+      setResendMessage(err.message || 'Failed to resend verification email.');
     }
   };
 
@@ -50,9 +72,27 @@ export default function Login() {
         <p className="text-slate-600 text-sm mb-6">
           Sign in to access your analyses and reports.
         </p>
-        {fromSignup && (
+        {(fromSignup && signupMessage) && (
+          <div className="mb-4 p-3 rounded-lg bg-green-50 border border-green-200 text-green-800 text-sm">
+            {signupMessage}
+          </div>
+        )}
+        {fromSignup && !signupMessage && (
           <div className="mb-4 p-3 rounded-lg bg-green-50 border border-green-200 text-green-800 text-sm">
             Account created. Please sign in.
+          </div>
+        )}
+        {emailNotVerified && (
+          <div className="mb-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm">
+            Please verify your email before logging in. Check your inbox for the verification link, or{' '}
+            <button type="button" onClick={handleResendVerification} className="underline font-medium hover:text-amber-900">
+              resend verification email
+            </button>.
+          </div>
+        )}
+        {resendMessage && (
+          <div className="mb-4 p-3 rounded-lg bg-slate-50 border border-slate-200 text-slate-800 text-sm">
+            {resendMessage}
           </div>
         )}
         <form onSubmit={handleSubmit} className="space-y-4">

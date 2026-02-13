@@ -15,6 +15,33 @@ from app.routers.auth import get_current_user
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 
+def _run_to_list_item(run: AnalysisRun) -> RunListItem:
+    """Build RunListItem from run, with optional summary from validation_result."""
+    vr = run.validation_result if isinstance(run.validation_result, dict) else None
+    acceptability = None
+    stage = None
+    has_comp = False
+    if vr:
+        vs = vr.get("validation_summary") if isinstance(vr.get("validation_summary"), dict) else None
+        if vs and vs.get("acceptability_status") is not None:
+            acceptability = str(vs.get("acceptability_status", ""))
+        stage = vr.get("submission_stage")
+        if stage is not None:
+            stage = str(stage)
+        has_comp = vr.get("submission_comparison") is not None
+    status = getattr(run, "status", None) or "completed"
+    return RunListItem(
+        id=run.id,
+        created_at=run.created_at,
+        contract_name=run.contract_name or "",
+        programme_name=run.programme_name,
+        acceptability_status=acceptability or None,
+        submission_stage=stage,
+        has_comparison=has_comp,
+        status=status,
+    )
+
+
 @router.get("", response_model=list[RunListItem])
 def list_runs(
     current_user: User = Depends(get_current_user),
@@ -31,7 +58,21 @@ def list_runs(
         .limit(limit)
         .all()
     )
-    return runs
+    return [_run_to_list_item(r) for r in runs]
+
+
+def _build_preferences_snapshot(user: User) -> dict:
+    """Snapshot of user preferences at run creation for consistent report generation."""
+    prefs = getattr(user, "preferences", None) or {}
+    if not isinstance(prefs, dict):
+        prefs = {}
+    return {
+        "confidentiality_mode": prefs.get("confidentiality_mode", False),
+        "default_report_format": prefs.get("default_report_format", "pdf"),
+        "organisation_logo_url": getattr(user, "organisation_logo_url", None) or None,
+        "auto_download_report": prefs.get("auto_download_report", False),
+        "data_retention_days": getattr(user, "data_retention_days", None) or 365,
+    }
 
 
 @router.post("", response_model=RunListItem, status_code=status.HTTP_201_CREATED)
@@ -40,18 +81,24 @@ def create_run(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Save a new analysis run for the current user."""
+    """Save a new analysis run for the current user. Snapshots user preferences at creation."""
+    snapshot = data.preferences_snapshot if isinstance(data.preferences_snapshot, dict) and data.preferences_snapshot else _build_preferences_snapshot(current_user)
+    status_val = (data.status or "completed").strip().lower() if data.status else "completed"
+    if status_val not in ("processing", "completed", "failed", "timed_out"):
+        status_val = "completed"
     run = AnalysisRun(
         user_id=current_user.id,
         contract_name=data.contract_name.strip() or "Contract",
         programme_name=data.programme_name.strip() if data.programme_name else None,
         contract_analysis=data.contract_analysis,
         validation_result=data.validation_result,
+        preferences_snapshot=snapshot,
+        status=status_val,
     )
     db.add(run)
     db.commit()
     db.refresh(run)
-    return run
+    return _run_to_list_item(run)
 
 
 @router.get("/export")

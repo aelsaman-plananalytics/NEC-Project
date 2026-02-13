@@ -5,19 +5,14 @@ Unified schema for contract extraction output.
 """
 
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExtractionOutput(BaseModel):
     """Unified extraction output schema."""
     
-    contract: Dict[str, Any] = Field(default_factory=dict, description="Contract metadata")
-    clauses: Dict[str, Any] = Field(default_factory=dict, description="Extracted clauses")
-    completeness: Dict[str, Any] = Field(default_factory=dict, description="Completeness assessment")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Extraction metadata")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "contract": {
                     "project": "Example Project",
@@ -40,3 +35,9 @@ class ExtractionOutput(BaseModel):
                 }
             }
         }
+    )
+
+    contract: Dict[str, Any] = Field(default_factory=dict, description="Contract metadata")
+    clauses: Dict[str, Any] = Field(default_factory=dict, description="Extracted clauses")
+    completeness: Dict[str, Any] = Field(default_factory=dict, description="Completeness assessment")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Extraction metadata")

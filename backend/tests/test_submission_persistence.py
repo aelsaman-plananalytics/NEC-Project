@@ -48,7 +48,9 @@ def store_dir(tmp_path):
 
 @pytest.fixture
 def store(store_dir):
-    return SubmissionStore(store_dir)
+    """Isolated store using tmp_path so tests do not share global submission_history."""
+    from app.storage.local_storage import LocalStorage
+    return SubmissionStore(storage=LocalStorage(base_dir=store_dir))
 
 
 def test_two_submissions_v1_not_acceptable_v2_acceptable_history(store: SubmissionStore):
@@ -87,6 +89,7 @@ def test_two_submissions_v1_not_acceptable_v2_acceptable_history(store: Submissi
         evolution_output=v2_evolution,
         planner_guidance_output=v2_guidance,
         previous_submission_id=r1["submission_id"],
+        submission_store=store,
     )
     store.save(r2)
 

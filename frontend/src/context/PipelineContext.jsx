@@ -11,6 +11,10 @@ function runToEntry(run) {
     contractName: run.contract_name || 'Contract',
     programmeName: run.programme_name ?? null,
     createdAt: run.created_at,
+    acceptabilityStatus: run.acceptability_status ?? null,
+    submissionStage: run.submission_stage ?? null,
+    hasComparison: run.has_comparison === true,
+    status: run.status || 'completed',
   };
 }
 
@@ -140,7 +144,7 @@ export function PipelineProvider({ children }) {
           // Keep UI unchanged; run not persisted (e.g. offline or server error)
         });
     },
-    [userId, contractAnalysis, validationResult, contractFile, programmeFile]
+    [contractAnalysis, validationResult, contractFile, programmeFile]
   );
 
   const removeFromHistory = useCallback((id) => {

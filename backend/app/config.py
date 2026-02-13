@@ -62,6 +62,20 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_API_KEY: str = ""
     """Optional ZeroBounce API key for email verification at signup. If set, only deliverable emails are accepted."""
 
+    # SMTP for verification emails (production-grade; no Resend)
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    """From address for verification emails (e.g. noreply@yourdomain.com)."""
+
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
+    """Base URL of the frontend app, used for verification links in email (e.g. https://app.example.com)."""
+
+    REQUIRE_EMAIL_VERIFICATION: bool = False
+    """If False, users can sign in without verifying email (e.g. when no SMTP provider is configured). Set True when email sending is in place."""
+
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
     def ensure_ssl_mode(cls, v: str) -> str:

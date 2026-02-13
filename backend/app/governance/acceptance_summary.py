@@ -8,13 +8,12 @@ and acceptance records only.
 from typing import Dict, List, Any, Optional
 
 from app.persistence.submission_store import SubmissionStore, _normalize_acceptability
-from app.persistence.acceptance_store import AcceptanceStore
 
 
 def build_acceptance_summary(
     submission_id: str,
     submission_store: Optional[SubmissionStore] = None,
-    acceptance_store: Optional[AcceptanceStore] = None,
+    acceptance_store: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Build acceptance summary for a submission. acceptability_status comes from
@@ -23,7 +22,10 @@ def build_acceptance_summary(
     """
     submission_id = (submission_id or "").strip()
     sub_store = submission_store or SubmissionStore()
-    acc_store = acceptance_store or AcceptanceStore(submission_store=sub_store)
+    if acceptance_store is None:
+        from app.persistence.acceptance_store import AcceptanceStore
+        acceptance_store = AcceptanceStore(submission_store=sub_store)
+    acc_store = acceptance_store
 
     submission = sub_store.get(submission_id)
     acceptability_status: Optional[str] = None

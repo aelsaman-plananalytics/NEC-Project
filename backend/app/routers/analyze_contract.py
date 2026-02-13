@@ -12,17 +12,16 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Body
-from fastapi.responses import JSONResponse, Response
+from fastapi import APIRouter, UploadFile, File, HTTPException, status
+from fastapi.responses import JSONResponse
 
 from app.services.parsing.parsers.pdf_parser import DocumentParser
 from app.services.extraction.core.feature_extractor import FeatureExtractor
 from app.services.extraction.core.ontology import EngineeringOntology
 from app.services.extraction.core.contract_classifier import ContractClassifier
 from app.services.extraction.core.scope_extractor import ScopeExtractor
-from app.services.extraction.extractors.contract_ingestion_engine import ContractIngestionEngine
-from app.contract_parser.nec_parser import NECParser
 from app.p6_engine.frozen_requirements import build_frozen_requirements
+from app.runtime_paths import RUNTIME_DIR
 
 router = APIRouter(
     prefix="/api",
@@ -32,8 +31,8 @@ router = APIRouter(
 
 
 def _get_latest_analysis_json_path():
-    """Return path to the latest analysis_*.json in outputs/analysis_reports, or None."""
-    analysis_dir = Path(__file__).parent.parent / "outputs" / "analysis_reports"
+    """Return path to the latest analysis_*.json in runtime/analysis_reports, or None."""
+    analysis_dir = RUNTIME_DIR / "analysis_reports"
     if not analysis_dir.exists():
         return None
     json_files = list(analysis_dir.glob("analysis_*.json"))
@@ -493,7 +492,9 @@ def split_into_lines(text: str) -> List[Dict[str, Any]]:
     return lines
 
 
-@router.post("/analyze_contract")
+# Deprecated: use POST /api/v1/analyze_contract. Kept for backward compatibility.
+@router.post("/analyze_contract", deprecated=True, include_in_schema=False)
+@router.post("/v1/analyze_contract")
 async def analyze_contract(file: UploadFile = File(...)) -> JSONResponse:
     """
     Extract compact, structured scope items from contract document (PDF only).
@@ -567,12 +568,26 @@ async def analyze_contract(file: UploadFile = File(...)) -> JSONResponse:
             tmp_file.write(content)
             temp_file_path = tmp_file.name
 
-        response_data = _run_contract_analysis_from_path(temp_file_path, file.filename, content)
+        from app.performance import run_with_timeout, log_performance_metric, CONTRACT_ANALYSIS_TIMEOUT
+        import time as _time
+        _t0 = _time.time()
+        try:
+            response_data = run_with_timeout(
+                lambda: _run_contract_analysis_from_path(temp_file_path, file.filename, content),
+                CONTRACT_ANALYSIS_TIMEOUT,
+                "contract_analysis",
+            )
+        except TimeoutError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Contract analysis did not complete within {CONTRACT_ANALYSIS_TIMEOUT}s.",
+            ) from e
+        log_performance_metric("contract_analysis", (_time.time() - _t0) * 1000)
         
         # Save to JSON file
         try:
-            # Save to analysis_reports folder
-            analysis_dir = Path(__file__).parent.parent / "outputs" / "analysis_reports"
+            # Save to runtime/analysis_reports
+            analysis_dir = RUNTIME_DIR / "analysis_reports"
             analysis_dir.mkdir(parents=True, exist_ok=True)
             
             # Generate unique filename with timestamp
@@ -643,462 +658,4 @@ async def get_latest_contract_analysis() -> JSONResponse:
     with open(latest_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return JSONResponse(status_code=status.HTTP_200_OK, content=data)
-
-
-@router.post("/generate_report")
-async def generate_report(
-    json_file: UploadFile = File(..., description="JSON file output from /api/analyze_contract")
-) -> Response:
-    """
-    Generate a professional PDF report from contract analysis JSON.
-    
-    Accepts ONLY JSON file output from /api/analyze_contract endpoint.
-    Does NOT accept PDF or DOCX files.
-    
-    Process:
-    1. Validate JSON file (must be application/json)
-    2. Load and validate JSON structure
-    3. Pass to ReportGenerator to generate professional PDF
-    4. Return PDF file as response
-    
-    Args:
-        json_file: JSON file from /api/analyze_contract (required, application/json only)
-        
-    Returns:
-        Response: PDF file with Content-Type: application/pdf
-    """
-    print(f"[GENERATE_REPORT] Received file: {json_file.filename}")
-    
-    # Validate content type
-    if json_file.content_type and json_file.content_type not in ["application/json", "text/json"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid content type: {json_file.content_type}. Only application/json is accepted."
-        )
-    
-    # Validate file extension
-    if json_file.filename:
-        file_ext = Path(json_file.filename).suffix.lower()
-        if file_ext not in ['.json']:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid file type: {file_ext}. Only .json files are accepted."
-            )
-    
-    try:
-        # Load JSON from file
-        print(f"[GENERATE_REPORT] Loading JSON from file: {json_file.filename}")
-        contents = await json_file.read()
-        
-        try:
-            analysis_json = json.loads(contents.decode('utf-8'))
-        except UnicodeDecodeError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid file encoding. File must be UTF-8 encoded JSON."
-            )
-        
-        # Validate JSON structure
-        if not isinstance(analysis_json, dict):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid JSON format: expected a dictionary/object"
-            )
-        
-        # Validate required fields with graceful defaults
-        if "project" not in analysis_json:
-            analysis_json["project"] = "Unknown Project"
-        if "extracted_clauses" not in analysis_json:
-            analysis_json["extracted_clauses"] = {}
-        if "contract_completeness" not in analysis_json:
-            analysis_json["contract_completeness"] = {
-                "document_type": "unknown",
-                "filled_percentage": 0.0,
-                "blank_percentage": 0.0,
-                "mandatory_missing": 0,
-                "total_mandatory": 0
-            }
-        if "metadata" not in analysis_json:
-            analysis_json["metadata"] = {}
-        
-        # Generate PDF report from JSON data
-        print(f"[GENERATE_REPORT] Generating PDF report...")
-        from app.reporting.report_generator import ReportGenerator
-        
-        try:
-            generator = ReportGenerator()
-            report_bytes = generator.generate_pdf(analysis_json)
-            
-            # Check if it's PDF or DOCX (based on file extension if path returned, or try to detect)
-            is_docx = False
-            if isinstance(report_bytes, str):
-                # Path returned - check extension
-                is_docx = report_bytes.endswith('.docx')
-                with open(report_bytes, 'rb') as f:
-                    report_bytes = f.read()
-            else:
-                # Check if it's a DOCX (ZIP-based format)
-                # PDFs start with %PDF, DOCX starts with PK (ZIP signature)
-                if report_bytes[:4] == b'PK\x03\x04' and report_bytes[:4] != b'%PDF':
-                    is_docx = True
-            
-            print(f"[GENERATE_REPORT] Report generated ({len(report_bytes)} bytes, format: {'DOCX' if is_docx else 'PDF'})")
-            
-            # Return report as response
-            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if is_docx else "application/pdf"
-            filename = "contract_analysis_report.docx" if is_docx else "contract_analysis_report.pdf"
-            
-            return Response(
-                content=report_bytes,
-                media_type=media_type,
-                headers={
-                    "Content-Disposition": f"attachment; filename={filename}"
-                }
-            )
-        except Exception as e:
-            import traceback
-            error_trace = traceback.format_exc()
-            print(f"[GENERATE_REPORT] Error generating PDF: {str(e)}")
-            print(f"Traceback: {error_trace}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Error generating PDF report: {str(e)}"
-            )
-        
-    except HTTPException:
-        raise
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid JSON format: {str(e)}"
-        )
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"[GENERATE_REPORT] Error generating report: {str(e)}")
-        print(f"Traceback: {error_trace}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error generating report: {str(e)}"
-        )
-
-
-@router.post("/ingest_contract")
-async def ingest_contract_structured(file: UploadFile = File(...)) -> JSONResponse:
-    """
-    Ingest contract document (PDF) and extract fully structured NEC contract data.
-    
-    This endpoint uses the Contract Ingestion Engine to extract:
-    - Tables (Schedule of Drawings, Series tables)
-    - Structured clauses (Part 1, Part 2)
-    - Contract data fields
-    - Complete structured JSON model
-    
-    Args:
-        file: Uploaded PDF file
-        
-    Returns:
-        JSONResponse: Fully structured contract data matching NEC contract model
-    """
-    print(f"[INGEST_CONTRACT] Received file: {file.filename}, content_type: {file.content_type}")
-    
-    # Validate file type
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No filename provided"
-        )
-    
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in ['.pdf']:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {file_ext}. Only PDF is supported for structured ingestion."
-        )
-    
-    temp_file_path = None
-    try:
-        # Read file content
-        content = await file.read()
-        
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(content)
-            temp_file_path = tmp_file.name
-        
-        print(f"[INGEST_CONTRACT] Processing file: {temp_file_path}")
-        
-        # Initialize ingestion engine
-        engine = ContractIngestionEngine()
-        
-        # Ingest contract
-        structured_data = engine.ingest_contract(temp_file_path)
-        
-        # Save to JSON file
-        try:
-            # Save to contracts folder
-            contracts_dir = Path(__file__).parent.parent / "outputs" / "contracts"
-            contracts_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate unique filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_filename = re.sub(r'[^\w\-_\.]', '_', Path(file.filename).stem) if file.filename else "contract"
-            json_filename = f"structured_{safe_filename}_{timestamp}.json"
-            json_filepath = contracts_dir / json_filename
-            
-            # Save JSON file
-            with open(json_filepath, 'w', encoding='utf-8') as f:
-                json.dump(structured_data, f, indent=2, ensure_ascii=False)
-            
-            print(f"[INGEST_CONTRACT] Structured data saved to: {json_filepath}")
-            
-            # Add file path to metadata
-            structured_data["metadata"]["output_file"] = str(json_filepath)
-            structured_data["metadata"]["output_filename"] = json_filename
-            
-        except Exception as save_error:
-            print(f"[INGEST_CONTRACT] Warning: Failed to save JSON file: {str(save_error)}")
-        
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=structured_data
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"[INGEST_CONTRACT] Error processing file: {str(e)}")
-        print(f"Traceback: {error_trace}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing file: {str(e)}"
-        )
-    finally:
-        # Clean up temporary file
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.unlink(temp_file_path)
-            except Exception:
-                pass  # Ignore cleanup errors
-
-@router.post("/extract_pdf_structured")
-async def extract_pdf_structured(file: UploadFile = File(...)) -> JSONResponse:
-    """
-    Extract structured data from PDF (text blocks and tables).
-    
-    Returns JSON with pages containing:
-    - text_blocks: List of text block strings
-    - tables: List of tables, each with rows
-    
-    Args:
-        file: Uploaded PDF file
-        
-    Returns:
-        JSONResponse: {
-            "pages": [
-                {
-                    "page_no": int,
-                    "text_blocks": List[str],
-                    "tables": [
-                        {
-                            "rows": List[List[str]]
-                        }
-                    ]
-                }
-            ],
-            "metadata": {
-                "filename": str,
-                "extraction_timestamp": str,
-                "total_pages": int,
-                "total_tables": int,
-                "total_text_blocks": int
-            }
-        }
-    """
-    print(f"[EXTRACT_PDF_STRUCTURED] Received file: {file.filename}")
-    
-    # Validate file type
-    if not file.filename:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No filename provided"
-        )
-    
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in ['.pdf']:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type: {file_ext}. Only PDF is supported for structured extraction."
-        )
-    
-    temp_file_path = None
-    try:
-        # Read file content
-        content = await file.read()
-        
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(content)
-            temp_file_path = tmp_file.name
-        
-        print(f"[EXTRACT_PDF_STRUCTURED] Processing file: {temp_file_path}")
-        
-        # Extract structured data
-        structured_data = DocumentParser.extract_structured(temp_file_path)
-        
-        # Save to JSON file
-        try:
-            # Save to contracts folder
-            contracts_dir = Path(__file__).parent.parent / "outputs" / "contracts"
-            contracts_dir.mkdir(parents=True, exist_ok=True)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_filename = re.sub(r'[^\w\-_\.]', '_', Path(file.filename).stem) if file.filename else "pdf"
-            json_filename = f"structured_pdf_{safe_filename}_{timestamp}.json"
-            json_filepath = contracts_dir / json_filename
-            
-            with open(json_filepath, 'w', encoding='utf-8') as f:
-                json.dump(structured_data, f, indent=2, ensure_ascii=False)
-            
-            print(f"[EXTRACT_PDF_STRUCTURED] Structured data saved to: {json_filepath}")
-            
-            # Add metadata
-            structured_data["metadata"] = {
-                "filename": file.filename,
-                "extraction_timestamp": datetime.now().isoformat(),
-                "output_file": str(json_filepath),
-                "output_filename": json_filename,
-                "total_pages": len(structured_data.get("pages", [])),
-                "total_tables": sum(len(page.get("tables", [])) for page in structured_data.get("pages", [])),
-                "total_text_blocks": sum(len(page.get("text_blocks", [])) for page in structured_data.get("pages", []))
-            }
-            
-        except Exception as save_error:
-            print(f"[EXTRACT_PDF_STRUCTURED] Warning: Failed to save JSON file: {str(save_error)}")
-        
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=structured_data
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"[EXTRACT_PDF_STRUCTURED] Error processing file: {str(e)}")
-        print(f"Traceback: {error_trace}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing file: {str(e)}"
-        )
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.unlink(temp_file_path)
-            except Exception:
-                pass
-
-
-@router.post("/parse_nec_contract")
-async def parse_nec_contract(file: UploadFile = File(...)) -> JSONResponse:
-    """
-    Parse NEC contract PDF and extract programme-critical information.
-    
-    Uses TOC detection and fuzzy matching to locate and extract:
-    - Scope items
-    - Constraints
-    - Milestones
-    - Contract dates
-    
-    Works in both MOCK and REAL mode (respects AI_MODE environment variable).
-    
-    Returns clean, reduced JSON with only programme-critical information.
-    """
-    print(f"[PARSE_NEC_CONTRACT] Received file: {file.filename}, content_type: {file.content_type}")
-    
-    if not file.filename:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No filename provided")
-    
-    file_ext = Path(file.filename).suffix.lower()
-    if file_ext != '.pdf':
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Only PDF files are supported. Received: {file_ext}"
-        )
-    
-    temp_file_path = None
-    try:
-        # Read file content
-        content = await file.read()
-        
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
-            tmp_file.write(content)
-            temp_file_path = tmp_file.name
-        
-        print(f"[PARSE_NEC_CONTRACT] Processing file: {temp_file_path}")
-        
-        # Initialize NEC parser
-        nec_parser = NECParser()
-        
-        # Parse contract
-        result = nec_parser.parse_contract(temp_file_path)
-        
-        # Check AI_MODE
-        ai_mode = os.getenv("AI_MODE", "mock").lower().strip()
-        print(f"[PARSE_NEC_CONTRACT] AI_MODE: {ai_mode}")
-        
-        # Save to JSON file
-        try:
-            # Save to contracts folder
-            contracts_dir = Path(__file__).parent.parent / "outputs" / "contracts"
-            contracts_dir.mkdir(parents=True, exist_ok=True)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_filename = re.sub(r'[^\w\-_\.]', '_', Path(file.filename).stem) if file.filename else "contract"
-            json_filename = f"nec_parse_{safe_filename}_{timestamp}.json"
-            json_filepath = contracts_dir / json_filename
-            
-            with open(json_filepath, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-            
-            file_size_mb = os.path.getsize(json_filepath) / (1024 * 1024)
-            print(f"[PARSE_NEC_CONTRACT] Results saved to: {json_filepath}")
-            print(f"[PARSE_NEC_CONTRACT] Output file size: {file_size_mb:.2f} MB")
-            
-            if file_size_mb > 1.0:
-                print(f"[PARSE_NEC_CONTRACT] WARNING: Output exceeds 1MB limit! Current: {file_size_mb:.2f} MB")
-            
-            result["metadata"]["output_file"] = str(json_filepath)
-            result["metadata"]["output_filename"] = json_filename
-            result["metadata"]["output_size_mb"] = round(file_size_mb, 2)
-            
-        except Exception as save_error:
-            print(f"[PARSE_NEC_CONTRACT] Warning: Failed to save JSON file: {str(save_error)}")
-        
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=result
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"[PARSE_NEC_CONTRACT] Error: {str(e)}")
-        print(f"Traceback: {error_trace}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error parsing contract: {str(e)}"
-        )
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.unlink(temp_file_path)
-            except Exception:
-                pass
 

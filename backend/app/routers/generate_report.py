@@ -9,12 +9,19 @@ Exposes build_validation_report for frontend preview (same structure as PDF).
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Dict
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, Body
+from typing import Any, Dict, Optional
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Query, Body, Depends
 from fastapi.responses import Response
+from sqlalchemy.orm import Session
 
 from app.reporting.report_generator import ReportGenerator
 from app.reporting.validation_report_builder import build_validation_report
+from app.runtime_paths import RUNTIME_DIR
+from app.database import get_db
+from app.storage import get_storage
+from app.models.analysis_run import AnalysisRun
+from app.routers.auth import get_current_user_optional
+from app.models.user import User
 
 router = APIRouter(
     prefix="/api",
@@ -22,7 +29,9 @@ router = APIRouter(
 )
 
 
-@router.post("/build_validation_report")
+# Deprecated: use POST /api/v1/build_validation_report. Kept for backward compatibility.
+@router.post("/build_validation_report", deprecated=True, include_in_schema=False)
+@router.post("/v1/build_validation_report")
 async def build_validation_report_endpoint(
     body: Dict[str, Any] = Body(..., description="Validation JSON from /api/validate_programme"),
 ) -> Dict[str, Any]:
@@ -47,10 +56,18 @@ async def build_validation_report_endpoint(
         )
 
 
-@router.post("/generate_report")
+# Deprecated: use POST /api/v1/generate_report. Kept for backward compatibility.
+@router.post("/generate_report", deprecated=True, include_in_schema=False)
+@router.post("/v1/generate_report")
 async def generate_report(
     json_file: UploadFile = File(..., description="Validation JSON file from /api/validate_programme"),
-    format: str = Query("pdf", description="Output format: pdf, docx, or html")
+    format: str = Query("pdf", description="Output format: pdf, docx, or html"),
+    confidentiality_mode: Optional[str] = Form(None, description="If 'true', redact activity names in report"),
+    organisation_logo_url: Optional[str] = Form(None, description="URL for organisation logo (header/footer)"),
+    user_name: Optional[str] = Form(None, description="User name for report header/footer"),
+    run_id: Optional[int] = Form(None, description="If set, use this run's preferences_snapshot (requires auth)"),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
 ) -> Response:
     """
     Generate professional report from validation JSON.
@@ -103,57 +120,67 @@ async def generate_report(
         
         print(f"[GENERATE_REPORT] Generating report from validation JSON: {json_file.filename}")
         
+        # Report options: from run's preferences_snapshot when run_id provided (historical run), else from form
+        report_options = {}
+        if run_id is not None:
+            if current_user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication required when generating report for a saved run (run_id).",
+                )
+            run = db.query(AnalysisRun).filter(
+                AnalysisRun.id == run_id,
+                AnalysisRun.user_id == current_user.id,
+            ).first()
+            if not run:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Analysis run not found.",
+                )
+            snapshot = getattr(run, "preferences_snapshot", None) or {}
+            if isinstance(snapshot, dict):
+                report_options = dict(snapshot)
+            if current_user and (not report_options.get("user_name")):
+                report_options["user_name"] = (current_user.name or "").strip() or None
+        else:
+            if confidentiality_mode == "true":
+                report_options["confidentiality_mode"] = True
+            if organisation_logo_url and organisation_logo_url.strip():
+                report_options["organisation_logo_url"] = organisation_logo_url.strip()
+            if user_name and user_name.strip():
+                report_options["user_name"] = user_name.strip()
+        if report_options:
+            validation_data["_report_options"] = report_options
+        
         # Generate report
+        from app.performance import log_performance_metric
+        import time as _time
         generator = ReportGenerator()
-        
-        # Save to reports folder
-        reports_dir = Path(__file__).parent.parent / "outputs" / "reports"
-        reports_dir.mkdir(parents=True, exist_ok=True)
+        storage = get_storage()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+        _t0 = _time.time()
         if format == "pdf":
-            output_path = reports_dir / f"report_{timestamp}.pdf"
-            result = generator.generate_pdf(validation_data, output_path=str(output_path))
+            result = generator.generate_pdf(validation_data, output_path=None, report_options=validation_data.get("_report_options"))
+            report_bytes = result if isinstance(result, bytes) else (open(result, "rb").read() if isinstance(result, str) else b"")
+            storage.save_bytes(f"reports/report_{timestamp}.pdf", report_bytes)
             media_type = "application/pdf"
             filename = f"nec_validation_report_{timestamp}.pdf"
-            # Read the saved file for response
-            if isinstance(result, str):
-                # File was saved, read it
-                with open(result, 'rb') as f:
-                    report_bytes = f.read()
-            else:
-                # Bytes returned, save to file
-                with open(output_path, 'wb') as f:
-                    f.write(result)
-                report_bytes = result
-            print(f"[GENERATE_REPORT] Report saved to: {output_path}")
+            print(f"[GENERATE_REPORT] Report saved to storage: reports/report_{timestamp}.pdf")
         elif format == "docx":
-            output_path = reports_dir / f"report_{timestamp}.docx"
-            result = generator.generate_docx(validation_data, output_path=str(output_path))
+            result = generator.generate_docx(validation_data, output_path=None, report_options=validation_data.get("_report_options"))
+            report_bytes = result if isinstance(result, bytes) else (open(result, "rb").read() if isinstance(result, str) else b"")
+            storage.save_bytes(f"reports/report_{timestamp}.docx", report_bytes)
             media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             filename = f"nec_validation_report_{timestamp}.docx"
-            # Read the saved file for response
-            if isinstance(result, str):
-                # File was saved, read it
-                with open(result, 'rb') as f:
-                    report_bytes = f.read()
-            else:
-                # Bytes returned, save to file
-                with open(output_path, 'wb') as f:
-                    f.write(result)
-                report_bytes = result
-            print(f"[GENERATE_REPORT] Report saved to: {output_path}")
+            print(f"[GENERATE_REPORT] Report saved to storage: reports/report_{timestamp}.docx")
         else:  # html
-            output_path = reports_dir / f"report_{timestamp}.html"
-            report_html = generator.generate_html(validation_data)
+            report_html = generator.generate_html(validation_data, report_options=validation_data.get("_report_options"))
+            report_bytes = report_html.encode("utf-8")
+            storage.save_bytes(f"reports/report_{timestamp}.html", report_bytes)
             media_type = "text/html"
             filename = f"nec_validation_report_{timestamp}.html"
-            # Save HTML to file
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(report_html)
-            print(f"[GENERATE_REPORT] Report saved to: {output_path}")
-            report_bytes = report_html.encode('utf-8')
-        
+            print(f"[GENERATE_REPORT] Report saved to storage: reports/report_{timestamp}.html")
+        log_performance_metric("report_generation", (_time.time() - _t0) * 1000)
         return Response(
             content=report_bytes,
             media_type=media_type,

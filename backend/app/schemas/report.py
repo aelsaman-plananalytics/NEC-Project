@@ -3,12 +3,14 @@ Pydantic schemas for report generation endpoints.
 """
 
 from typing import Optional, Dict, Any, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ReportInput(BaseModel):
     """Schema for report generation input (JSON from analyze_contract)."""
-    
+
+    model_config = ConfigDict(extra="allow")  # Allow additional fields for flexibility
+
     project: str = Field(..., description="Project name")
     scope_items: List[Dict[str, Any]] = Field(default_factory=list, description="Scope items")
     constraints: List[Dict[str, Any]] = Field(default_factory=list, description="Constraints")
@@ -25,9 +27,6 @@ class ReportInput(BaseModel):
     extracted_clauses: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Extracted clauses")
     contract_completeness: Dict[str, Any] = Field(default_factory=dict, description="Contract completeness")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Analysis metadata")
-    
-    class Config:
-        extra = "allow"  # Allow additional fields for flexibility
 
 
 class ReportResponse(BaseModel):

@@ -1,0 +1,36 @@
+fastapi
+uvicorn
+httpx
+sqlalchemy
+psycopg2
+pydantic
+pydantic-settings
+python-dotenv
+bcrypt>=4.0,<5
+PyJWT
+openai
+qdrant-client
+pdfplumber
+PyMuPDF
+lxml
+python-docx
+pandas
+numpy
+redis
+celery
+jinja2
+
+# NEC Contract Ingestion Engine Dependencies
+camelot-py[cv]>=0.11.0  # Table extraction from vector PDFs
+pytesseract>=0.3.10  # OCR for image-based PDFs
+pdf2image>=1.16.0  # PDF to image conversion for OCR
+Pillow>=10.0.0  # Image processing
+
+# Report Generation Dependencies
+reportlab>=4.0.0  # PDF generation (Windows-compatible)
+
+# Scheduler (retention every 24h)
+APScheduler>=3.10.0
+
+# Testing
+pytest>=7.0.0  # run_all_tests.py and backend/tests

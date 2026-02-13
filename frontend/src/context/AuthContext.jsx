@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { setAuthToken, getAuthToken, apiLogin, apiSignup, apiGetMe, apiUpdateMe } from '../services/api';
+import { setAuthToken, getAuthToken, apiLogin, apiSignup, apiGetMe, apiUpdateMe, setUnauthorizedHandler } from '../services/api';
 
 const DEFAULT_PREFERENCES = {
   programme_stage_assumption: 'auto',
@@ -31,7 +31,27 @@ function mapUserFromApi(apiUser) {
     dataRetentionDays: apiUser.data_retention_days ?? 365,
     organisationLogoUrl: apiUser.organisation_logo_url ?? null,
     preferences: prefs,
+    isVerified: apiUser.is_verified === true,
   };
+}
+
+/** Decode JWT payload without verification (exp check only). Returns { exp } or null. */
+function decodeJwtExp(token) {
+  try {
+    const parts = (token || '').split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload && typeof payload.exp === 'number' ? { exp: payload.exp } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True if token is expired (with 60s buffer). */
+function isTokenExpired(token) {
+  const decoded = decodeJwtExp(token);
+  if (!decoded) return true;
+  return Date.now() / 1000 >= decoded.exp - 60;
 }
 
 const AuthContext = createContext(null);
@@ -43,6 +63,13 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     const token = getAuthToken();
     if (!token) {
+      setUserState(null);
+      setLoading(false);
+      return;
+    }
+    if (isTokenExpired(token)) {
+      setAuthToken(null);
+      setUserState(null);
       setLoading(false);
       return;
     }
@@ -52,15 +79,33 @@ export function AuthProvider({ children }) {
           setUserState(mapUserFromApi(data));
         } else {
           setAuthToken(null);
+          setUserState(null);
         }
       })
       .catch(() => {
         setAuthToken(null);
+        setUserState(null);
       })
       .finally(() => {
         setLoading(false);
       });
   }, []);
+
+  const handleUnauthorized = useCallback(() => {
+    setAuthToken(null);
+    setUserState(null);
+    try {
+      if (typeof window !== 'undefined') localStorage.removeItem('nec_analysis_token');
+    } catch (_) {}
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login';
+    }
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(handleUnauthorized);
+    return () => setUnauthorizedHandler(() => {});
+  }, [handleUnauthorized]);
 
   const login = useCallback(async (email, password) => {
     if (!email || !password) {
@@ -80,14 +125,23 @@ export function AuthProvider({ children }) {
       throw new Error('Password must be at least 8 characters.');
     }
     const data = await apiSignup(email, password, name, organisation);
-    setAuthToken(data.access_token);
-    setUserState(mapUserFromApi(data.user));
-    return mapUserFromApi(data.user);
+    // After email verification: backend returns { message, email }, no token until verified.
+    if (data.access_token && data.user) {
+      setAuthToken(data.access_token);
+      setUserState(mapUserFromApi(data.user));
+      return mapUserFromApi(data.user);
+    }
+    return { message: data.message || 'Check your email to verify your account before logging in.', email: data.email };
   }, []);
 
   const logout = useCallback(() => {
     setAuthToken(null);
     setUserState(null);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem('nec_analysis_token');
+      } catch (_) {}
+    }
   }, []);
 
   const updateProfile = useCallback(async (updates) => {
@@ -112,6 +166,7 @@ export function AuthProvider({ children }) {
     signup,
     logout,
     updateProfile,
+    handleUnauthorized,
     isAuthenticated: !!user,
   };
 

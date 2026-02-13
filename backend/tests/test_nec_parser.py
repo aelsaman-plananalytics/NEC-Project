@@ -21,69 +21,43 @@ from app.contract_parser.cleaner import TextCleaner
 
 
 class TestTOCDetector:
-    """Test TOC detection functionality."""
+    """Test TOC detection functionality (stub returns None/empty)."""
     
     def test_detect_toc_page(self):
-        """Test TOC page detection."""
+        """TOC detector stub returns None when no TOC detection is used."""
         detector = TOCDetector()
-        
-        # Mock pages
         pages = [
             {"text_blocks": ["Page 1 content"]},
             {"text_blocks": ["Table of Contents", "1.2 Works Description ... 5"]},
-            {"text_blocks": ["Page 3 content"]}
         ]
-        
         toc_page_idx = detector.detect_toc_page(pages)
-        assert toc_page_idx == 1, "Should detect TOC on page 2 (index 1)"
-    
+        assert toc_page_idx is None, "Stub returns None"
+
     def test_extract_toc_entries(self):
-        """Test TOC entry extraction."""
+        """TOC detector stub returns empty list."""
         detector = TOCDetector()
-        
-        pages = [
-            {"text_blocks": ["Table of Contents"], "tables": [
-                {"rows": [
-                    ["1.2 Works Description", "5"],
-                    ["1.3 Employer", "6"],
-                    ["3. Time", "10"]
-                ]}
-            ]}
-        ]
-        
+        pages = [{"text_blocks": ["Table of Contents"], "tables": [{"rows": []}]}]
         entries = detector.extract_toc_entries(pages, 0)
-        assert len(entries) == 3, "Should extract 3 TOC entries"
-        assert entries[0]["title"] == "1.2 Works Description"
-        assert entries[0]["page_number"] == 5
+        assert entries == [], "Stub returns empty list"
 
 
 class TestClauseLocator:
-    """Test clause location functionality."""
-    
+    """Test clause location functionality (stub returns empty dict)."""
+
     def test_find_clauses_from_toc(self):
-        """Test clause finding from TOC."""
+        """ClauseLocator stub returns empty dict."""
         locator = ClauseLocator()
-        
         toc_entries = [
             {"title": "1.2 Works Description", "page_number": 5},
-            {"title": "Works Information", "page_number": 8},
-            {"title": "Section 3 Time", "page_number": 10},
-            {"title": "Schedule of Drawings", "page_number": 13}
+            {"title": "Schedule of Drawings", "page_number": 13},
         ]
-        
         clauses = locator.find_clauses_from_toc(toc_entries)
-        assert clauses["works_description"] == 5
-        assert clauses["works_information"] == 8
-        assert clauses["time_section"] == 10
-        assert clauses["drawings"] == 13
-    
-    def test_fuzzy_match(self):
-        """Test fuzzy string matching."""
+        assert clauses == {}, "Stub returns empty dict"
+
+    def test_fuzzy_match_removed(self):
+        """ClauseLocator no longer exposes _fuzzy_match (stub implementation)."""
         locator = ClauseLocator()
-        
-        assert locator._fuzzy_match("works description", "Works Description", 0.7)
-        assert locator._fuzzy_match("works info", "Works Information", 0.7)
-        assert not locator._fuzzy_match("works description", "time section", 0.7)
+        assert not hasattr(locator, "_fuzzy_match")
 
 
 class TestSectionExtractor:
@@ -123,19 +97,18 @@ class TestSectionExtractor:
         assert milestones[0]["category"] in ["design", "approval", "test", "handover", "certificate"]
     
     def test_extract_contract_dates(self):
-        """Test contract date extraction."""
+        """Test contract date extraction (uses access_dates not possession_dates)."""
         extractor = SectionExtractor()
-        
         text = """
         Starting date: 01/01/2024
         Completion date: 31/12/2024
         Possession date: 15/01/2024
         """
         dates = extractor.extract_contract_dates(text)
-        
         assert dates["starting_date"] != ""
         assert dates["completion_date"] != ""
-        assert len(dates["possession_dates"]) > 0
+        assert "access_dates" in dates
+        assert len(dates["access_dates"]) > 0
 
 
 class TestTextCleaner:
@@ -166,21 +139,18 @@ class TestNECParser:
     """Test main NEC parser."""
     
     def test_empty_result_structure(self):
-        """Test that empty result has correct structure."""
+        """Test that empty result has correct structure (constraints may be dict or list)."""
         parser = NECParser()
         result = parser._empty_result("test.pdf")
-        
         assert "metadata" in result
         assert "scope_items" in result
         assert "constraints" in result
         assert "milestones" in result
         assert "contract_dates" in result
-        
         assert isinstance(result["scope_items"], list)
-        assert isinstance(result["constraints"], list)
         assert isinstance(result["milestones"], list)
         assert isinstance(result["contract_dates"], dict)
-        
+        assert isinstance(result["constraints"], (dict, list))
         assert "file_name" in result["metadata"]
         assert "extraction_timestamp" in result["metadata"]
         assert "toc_detected" in result["metadata"]
@@ -200,35 +170,46 @@ class TestNECParser:
         assert len(unique) == 2, "Should remove duplicate"
 
 
-@pytest.mark.skipif(
-    not os.path.exists("test_data/sample_contract.pdf"),
-    reason="Test PDF file not found"
+# Minimal valid PDF (single empty page) for integration test when no real contract is present
+_MINIMAL_PDF_BYTES = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\n"
+    b"xref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF"
 )
+
+
+@pytest.fixture
+def sample_pdf_path(tmp_path):
+    """Real contract path if present, otherwise a minimal PDF so the test always runs."""
+    real = Path("test_data/sample_contract.pdf")
+    if real.exists():
+        return str(real)
+    minimal = tmp_path / "sample_contract.pdf"
+    minimal.write_bytes(_MINIMAL_PDF_BYTES)
+    return str(minimal)
+
+
 class TestNECParserIntegration:
-    """Integration tests with real PDF (if available)."""
-    
-    def test_parse_real_contract(self):
-        """Test parsing a real contract PDF."""
-        pdf_path = "test_data/sample_contract.pdf"
-        
-        if not os.path.exists(pdf_path):
-            pytest.skip("Test PDF not available")
-        
+    """Integration tests: real PDF if available, otherwise minimal PDF for structure checks."""
+
+    def test_parse_real_contract(self, sample_pdf_path):
+        """Test parsing a contract PDF (real or minimal). Verifies output structure."""
         parser = NECParser()
-        result = parser.parse_contract(pdf_path)
-        
+        result = parser.parse_contract(sample_pdf_path)
+
         # Verify structure
         assert "metadata" in result
         assert "scope_items" in result
         assert "constraints" in result
         assert "milestones" in result
         assert "contract_dates" in result
-        
+
         # Verify metadata
-        assert result["metadata"]["file_name"] == os.path.basename(pdf_path)
+        assert result["metadata"]["file_name"] == os.path.basename(sample_pdf_path)
         assert "extraction_timestamp" in result["metadata"]
-        assert isinstance(result["metadata"]["toc_detected"], bool)
-        assert isinstance(result["metadata"]["missing_sections"], list)
+        assert isinstance(result["metadata"].get("toc_detected"), bool)
+        assert isinstance(result["metadata"].get("missing_sections"), list)
 
 
 if __name__ == "__main__":

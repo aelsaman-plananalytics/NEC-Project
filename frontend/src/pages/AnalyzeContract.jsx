@@ -80,11 +80,11 @@ const AnalyzeContract = () => {
     formData.append('file', file);
 
     try {
-      console.log('Sending request to:', `${API_BASE_URL}/api/analyze_contract`);
+      console.log('Sending request to:', `${API_BASE_URL}/api/v1/analyze_contract`);
       console.log('File:', file.name, 'Size:', file.size);
       
       const response = await axios.post(
-        `${API_BASE_URL}/api/analyze_contract`,
+        `${API_BASE_URL}/api/v1/analyze_contract`,
         formData,
         {
           headers: {

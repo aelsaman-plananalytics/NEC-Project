@@ -126,8 +126,9 @@ class ReportGenerator:
     
     def __init__(self):
         """Initialize the report generator."""
-        self.output_dir = Path(__file__).parent.parent / "outputs"
-        self.output_dir.mkdir(exist_ok=True)
+        from app.runtime_paths import RUNTIME_DIR
+        self.output_dir = RUNTIME_DIR
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize Jinja2 environment for HTML template rendering
         if JINJA2_AVAILABLE:
@@ -584,17 +585,24 @@ class ReportGenerator:
         
         return recommendations
     
-    def generate_pdf(self, json_data: Dict[str, Any], output_path: Optional[str] = None) -> Union[bytes, str]:
+    def generate_pdf(
+        self,
+        json_data: Dict[str, Any],
+        output_path: Optional[str] = None,
+        report_options: Optional[Dict[str, Any]] = None,
+    ) -> Union[bytes, str]:
         """
         Generates a professional PDF report from JSON data.
         If input is validation JSON (alignment + contract_summary), produces Programme Validation Report (Sections A–G).
         Otherwise uses contract analysis template.
         Falls back to DOCX if PDF generation fails.
+        report_options: optional dict with confidentiality_mode (redact activity names), organisation_logo_url, user_name.
         """
+        opts = report_options or json_data.pop("_report_options", None) or {}
         is_validation = "alignment" in json_data and "contract_summary" in json_data
         if is_validation and REPORTLAB_AVAILABLE:
             try:
-                return self._generate_validation_pdf(json_data, output_path)
+                return self._generate_validation_pdf(json_data, output_path, report_options=opts)
             except Exception as e:
                 print(f"[ReportGenerator] Validation PDF failed: {e}, attempting DOCX fallback...")
                 if DOCX_AVAILABLE:
@@ -1012,13 +1020,18 @@ class ReportGenerator:
             else:
                 raise Exception(f"PDF generation failed and DOCX fallback unavailable: {pdf_error}")
     
-    def generate_docx(self, json_data: Dict[str, Any], output_path: Optional[str] = None) -> Union[bytes, str]:
+    def generate_docx(
+        self,
+        json_data: Dict[str, Any],
+        output_path: Optional[str] = None,
+        report_options: Optional[Dict[str, Any]] = None,
+    ) -> Union[bytes, str]:
         """
         Generates a professional DOCX report from JSON data.
         If input is validation JSON (alignment + contract_summary), produces Programme Validation Report (Sections A–G).
         """
         if "alignment" in json_data and "contract_summary" in json_data:
-            return self._generate_validation_docx(json_data, output_path)
+            return self._generate_validation_docx(json_data, output_path, report_options=report_options)
         if not DOCX_AVAILABLE:
             raise ImportError(
                 "python-docx is required for DOCX generation. "
@@ -1280,9 +1293,24 @@ class ReportGenerator:
             print(f"[ReportGenerator] DOCX generated ({len(docx_bytes)} bytes)")
             return docx_bytes
     
-    def _generate_validation_pdf(self, json_data: Dict[str, Any], output_path: Optional[str] = None) -> Union[bytes, str]:
+    def _generate_validation_pdf(
+        self,
+        json_data: Dict[str, Any],
+        output_path: Optional[str] = None,
+        report_options: Optional[Dict[str, Any]] = None,
+    ) -> Union[bytes, str]:
         """Generate Programme Validation Report (Sections A–G) as PDF. Flow-based layout only (Platypus)."""
         from app.reporting.validation_report_builder import build_validation_report
+        opts = report_options or {}
+        redact_activities = opts.get("confidentiality_mode") is True
+        user_name = (opts.get("user_name") or "").strip()
+        logo_url = (opts.get("organisation_logo_url") or "").strip()
+
+        def _redact(s: Any) -> str:
+            if not redact_activities:
+                return str(s).strip() if s is not None and str(s).strip() else "—"
+            return "—"
+
         report = build_validation_report(json_data)
         report = report if isinstance(report, dict) else {}
         if not REPORTLAB_AVAILABLE:
@@ -1346,6 +1374,15 @@ class ReportGenerator:
         meta = _sec("metadata")
         if not isinstance(meta, dict):
             meta = {}
+
+        # Plan Analytics header and metadata (branding; no change to acceptability logic)
+        header_style = ParagraphStyle('PlanAnalyticsHeader', parent=styles['Normal'], fontSize=10, textColor=colors.HexColor('#64748b'), spaceAfter=4)
+        story.append(Paragraph("Plan Analytics", header_style))
+        run_id = json_data.get("run_id")
+        submission_id = str(run_id) if run_id is not None else "—"
+        gen_ts = meta.get("validation_timestamp") or datetime.now().isoformat()
+        story.append(Paragraph(f"<b>Submission ID:</b> {submission_id}  |  <b>Generated:</b> {gen_ts[:19] if len(gen_ts) > 19 else gen_ts}", styles['Normal']))
+        story.append(Spacer(1, 12))
 
         # Section A — Executive Summary
         story.append(Paragraph("Programme Validation Report", title_style))
@@ -1587,7 +1624,7 @@ class ReportGenerator:
         for r in ra[:15]:
             r = _safe_row(r)
             table_data.append([
-                _p(r.get("contract_activity", r.get("activity_or_gate", "")), 90),
+                _p(_redact(r.get("contract_activity", r.get("activity_or_gate", ""))), 90),
                 _p(r.get("when_required", ""), 55),
                 _p(r.get("shown_in_programme", ""), 45),
                 _p(r.get("notes", r.get("evidence", "")), 75),
@@ -1604,7 +1641,7 @@ class ReportGenerator:
         for r in gate_rows[:15]:
             r = _safe_row(r)
             table_data2.append([
-                _p(r.get("activity_or_gate", ""), 100),
+                _p(_redact(r.get("activity_or_gate", "")), 100),
                 _p(r.get("status", ""), 30),
                 _p(r.get("evidence", ""), 80),
             ])
@@ -1706,6 +1743,10 @@ class ReportGenerator:
                 story.append(Paragraph(f"• [{ts}] {note}", styles['Normal']))
             story.append(Spacer(1, 20))
 
+        # Footer with version (branding only)
+        footer_style = ParagraphStyle('FooterVersion', parent=styles['Normal'], fontSize=8, textColor=colors.grey, spaceBefore=24)
+        story.append(Paragraph("NEC Engineering Analysis Report v1.0 — Programme validation output. Acceptability is determined under NEC Clause 31.", footer_style))
+
         doc.build(story)
         pdf_bytes = buffer.getvalue()
         buffer.close()
@@ -1717,7 +1758,12 @@ class ReportGenerator:
             return output_path
         return pdf_bytes
 
-    def _generate_validation_docx(self, json_data: Dict[str, Any], output_path: Optional[str] = None) -> Union[bytes, str]:
+    def _generate_validation_docx(
+        self,
+        json_data: Dict[str, Any],
+        output_path: Optional[str] = None,
+        report_options: Optional[Dict[str, Any]] = None,
+    ) -> Union[bytes, str]:
         """Generate Programme Validation Report (Sections A–G) as DOCX."""
         from app.reporting.validation_report_builder import build_validation_report
         if not DOCX_AVAILABLE:
@@ -1929,7 +1975,11 @@ class ReportGenerator:
         doc.save(buffer)
         return buffer.getvalue()
 
-    def _generate_validation_html(self, json_data: Dict[str, Any]) -> str:
+    def _generate_validation_html(
+        self,
+        json_data: Dict[str, Any],
+        report_options: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Generate Programme Validation Report (Sections A–G) as HTML."""
         from app.reporting.validation_report_builder import build_validation_report
         report = build_validation_report(json_data)
@@ -2226,14 +2276,15 @@ class ReportGenerator:
     def generate_html(
         self,
         json_data: Dict[str, Any],
-        narrative: Optional[Dict[str, Any]] = None
+        narrative: Optional[Dict[str, Any]] = None,
+        report_options: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Generate HTML report from JSON data.
         If input is validation JSON (alignment + contract_summary), produces Programme Validation Report (Sections A–G).
         """
         if "alignment" in json_data and "contract_summary" in json_data:
-            return self._generate_validation_html(json_data)
+            return self._generate_validation_html(json_data, report_options=report_options)
         
         from app.reporting.narrative_builder import NarrativeBuilder
         

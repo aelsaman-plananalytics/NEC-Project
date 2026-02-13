@@ -10,6 +10,7 @@ from app.governance.acceptance_records import create_acceptance_record
 from app.governance.acceptance_summary import build_acceptance_summary
 from app.persistence.submission_store import SubmissionStore, create_submission_record
 from app.persistence.acceptance_store import AcceptanceStore
+from app.storage.local_storage import LocalStorage
 from app.diagnostics.obligation_diagnostics import build_obligation_diagnostics
 from app.evolution.submission_evolution import build_submission_evolution
 from app.guidance.planner_guidance import build_planner_guidance
@@ -50,26 +51,28 @@ def tmp_dirs(tmp_path):
 
 @pytest.fixture
 def submission_store(tmp_dirs):
-    return SubmissionStore(tmp_dirs[0])
+    return SubmissionStore(storage=LocalStorage(tmp_dirs[0]))
 
 
 @pytest.fixture
 def acceptance_store(tmp_dirs, submission_store):
-    return AcceptanceStore(base_dir=tmp_dirs[1], submission_store=submission_store)
+    return AcceptanceStore(storage=LocalStorage(tmp_dirs[1]), submission_store=submission_store)
 
 
 @pytest.fixture
-def acceptable_submission(submission_store):
-    """One stored submission: ACCEPTABLE."""
-    rec = _minimal_submission_record("sub-acc-1", "proj-1", "ACCEPTABLE")
+def acceptable_submission(submission_store, request):
+    """One stored submission: ACCEPTABLE. Unique submission_id per test to avoid cross-test pollution."""
+    sid = f"sub-acc-1-{request.node.name}"
+    rec = _minimal_submission_record(sid, "proj-1", "ACCEPTABLE")
     submission_store.save(rec)
     return rec
 
 
 @pytest.fixture
-def not_acceptable_submission(submission_store):
-    """One stored submission: NOT_ACCEPTABLE."""
-    rec = _minimal_submission_record("sub-not-1", "proj-1", "NOT_ACCEPTABLE")
+def not_acceptable_submission(submission_store, request):
+    """One stored submission: NOT_ACCEPTABLE. Unique submission_id per test to avoid cross-test pollution."""
+    sid = f"sub-not-1-{request.node.name}"
+    rec = _minimal_submission_record(sid, "proj-1", "NOT_ACCEPTABLE")
     submission_store.save(rec)
     return rec
 

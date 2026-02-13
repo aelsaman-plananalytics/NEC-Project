@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { usePipeline } from '../context/PipelineContext';
 import { validateProgramme, apiGetLatestContractAnalysis } from '../services/api';
+import { getAcceptabilityLabel } from '../utils/validationSummary';
 
 export default function ProgrammeCompare() {
   const navigate = useNavigate();
@@ -181,7 +182,7 @@ export default function ProgrammeCompare() {
                 <ul className="space-y-2 text-sm text-slate-700">
                   <li>
                     <strong>Acceptability:</strong>{' '}
-                    {vsA.acceptability_status === 'ACCEPTABLE' ? 'Acceptable' : 'Not acceptable at this stage'}
+                    {getAcceptabilityLabel(vsA.acceptability_status)}
                   </li>
                   <li>
                     <strong>Required activities:</strong> {requiredLabelA}
@@ -200,8 +201,8 @@ export default function ProgrammeCompare() {
                 <ul className="space-y-2 text-sm text-slate-700">
                   <li>
                     <strong>Acceptability:</strong>{' '}
-                    {vsB.acceptability_status === 'ACCEPTABLE' ? 'Acceptable' : 'Not acceptable at this stage'}
-                    {vsB.acceptability_status !== 'ACCEPTABLE' && (
+                    {getAcceptabilityLabel(vsB.acceptability_status)}
+                    {(vsB.acceptability_status || '').toUpperCase() !== 'ACCEPTABLE' && (
                       <span className="block text-amber-700 text-xs mt-1">This programme does not meet the contract requirements.</span>
                     )}
                   </li>

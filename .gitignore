@@ -1,0 +1,36 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+
+# -------------------------
+# Backend runtime
+# -------------------------
+backend/app/outputs/
+backend/runtime/
+runtime/
+*.log
+
+# -------------------------
+# Node / React
+# -------------------------
+node_modules/
+frontend/node_modules/
+
+# -------------------------
+# OS junk
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# IDE
+# -------------------------
+.vscode/
+.idea/

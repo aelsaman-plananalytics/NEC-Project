@@ -4,14 +4,22 @@ Submission persistence: immutable, write-once records for NEC audit.
 Submission records are immutable for NEC audit purposes.
 Any attempt to overwrite an existing submission raises RuntimeError.
 Only new submissions may reference previous_submission_id.
+Ledger-style hash chaining: previous_record_hash links to previous submission's record_hash.
 No re-validation or recomputation on load.
 """
+
+from __future__ import annotations
 
 import json
 import uuid
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
 from datetime import datetime, timezone
+
+from app.persistence.integrity import compute_record_hash
+
+if TYPE_CHECKING:
+    from app.storage.storage_interface import StorageInterface
 
 _ACCEPTABILITY = "acceptability_status"
 _OBL_REPORT = "obligations_report"
@@ -112,20 +120,33 @@ def create_submission_record(
     planner_guidance_output: Dict[str, Any],
     previous_submission_id: Optional[str] = None,
     submission_id: Optional[str] = None,
+    submission_store: Optional["SubmissionStore"] = None,
 ) -> Dict[str, Any]:
     """
     Build a submission record (does not persist). Caller must pass exact outputs
     from validation API and from build_obligation_diagnostics, build_submission_evolution,
     build_planner_guidance. created_at is set to UTC now.
+    When previous_submission_id is set, pass submission_store so previous_record_hash
+    can be set for ledger chaining.
     """
     sid = submission_id or str(uuid.uuid4())
+    prev_id = previous_submission_id.strip() if previous_submission_id and str(previous_submission_id).strip() else None
+    previous_record_hash: Optional[str] = None
+    if prev_id:
+        if submission_store is None:
+            raise RuntimeError("submission_store required when previous_submission_id is set for ledger chaining.")
+        previous_record = submission_store.get(prev_id)
+        if previous_record is None:
+            raise RuntimeError("Ledger chain broken: previous submission not found.")
+        previous_record_hash = previous_record["record_hash"]
     record = {
         "submission_id": sid,
         "project_id": (project_id or "").strip(),
         "programme_name": (programme_name or "").strip(),
         "submission_stage": (submission_stage or "initial").strip().lower(),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "previous_submission_id": previous_submission_id.strip() if previous_submission_id and str(previous_submission_id).strip() else None,
+        "previous_submission_id": prev_id,
+        "previous_record_hash": previous_record_hash,
         "validation_response": validation_response,
         "planner_assumptions_used": list(planner_assumptions_used) if planner_assumptions_used else [],
         "diagnostics_output": diagnostics_output,
@@ -133,26 +154,35 @@ def create_submission_record(
         "planner_guidance_output": planner_guidance_output,
     }
     _validate_guardrails(record)
+    record["record_hash"] = compute_record_hash(record)
     return record
+
+
+def _default_storage() -> "StorageInterface":
+    from app.storage import get_storage
+    return get_storage()
 
 
 class SubmissionStore:
     """
-    File-backed immutable submission store. Write-once per submission_id.
+    Immutable submission store. Write-once per submission_id.
     Submission records are immutable for NEC audit purposes.
+    Uses storage abstraction (local or other backend).
     """
 
-    def __init__(self, base_dir: Optional[Path] = None):
-        if base_dir is None:
-            base_dir = Path(__file__).parent.parent / "outputs" / "submission_history"
-        self._base = Path(base_dir)
-        self._base.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        base_dir: Optional[Path] = None,
+        storage: Optional["StorageInterface"] = None,
+    ):
+        self._storage = storage if storage is not None else _default_storage()
+        self._prefix = "submission_history"
 
-    def _path(self, submission_id: str) -> Path:
+    def _path(self, submission_id: str) -> str:
         safe_id = "".join(c for c in submission_id if c.isalnum() or c == "-")
         if not safe_id:
             safe_id = str(uuid.uuid4())
-        return self._base / f"{safe_id}.json"
+        return f"{self._prefix}/{safe_id}.json"
 
     def save(self, record: Dict[str, Any]) -> None:
         """
@@ -163,23 +193,47 @@ class SubmissionStore:
         if not sid:
             raise RuntimeError("Submission record must have submission_id.")
         path = self._path(sid)
-        if path.exists():
+        if self._storage.exists(path):
             raise RuntimeError(
                 f"Submission records are immutable for NEC audit purposes. "
                 f"A record with submission_id={sid!r} already exists. Any attempt to overwrite is forbidden."
             )
+        stored_hash = record.get("record_hash")
+        if stored_hash is None:
+            raise RuntimeError("Submission record must include record_hash.")
+        computed = compute_record_hash(record)
+        if computed != stored_hash:
+            raise RuntimeError("Submission record integrity violation.")
         _validate_guardrails(record)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(record, f, indent=2, ensure_ascii=False)
+        self._storage.save_json(path, record)
+
+    def _verify_chain(self, record: Dict[str, Any]) -> None:
+        """Verify ledger chain: previous_record_hash matches previous submission's record_hash. Raises on failure."""
+        prev_hash = record.get("previous_record_hash")
+        if prev_hash is None:
+            return
+        prev_id = record.get("previous_submission_id")
+        if not prev_id:
+            return
+        previous_record = self.get(prev_id)
+        if previous_record is None:
+            raise RuntimeError("Ledger chain broken: previous submission not found.")
+        if prev_hash != previous_record["record_hash"]:
+            raise RuntimeError("Ledger chain integrity violation: previous record hash mismatch.")
 
     def get(self, submission_id: str) -> Optional[Dict[str, Any]]:
-        """Load a submission by id. Validates guardrails on load. Returns None if not found."""
+        """Load a submission by id. Validates guardrails and ledger chain on load. Returns None if not found."""
         path = self._path(submission_id)
-        if not path.exists():
+        record = self._storage.load_json(path)
+        if record is None:
             return None
-        with open(path, "r", encoding="utf-8") as f:
-            record = json.load(f)
+        if "record_hash" not in record:
+            raise RuntimeError("Stored record missing integrity hash.")
+        computed = compute_record_hash(record)
+        if computed != record["record_hash"]:
+            raise RuntimeError("Integrity check failed: record modified after save.")
         _validate_guardrails(record)
+        self._verify_chain(record)
         return record
 
     def list_by_project(self, project_id: str) -> List[Dict[str, Any]]:
@@ -189,15 +243,19 @@ class SubmissionStore:
         """
         project_id = (project_id or "").strip()
         records = []
-        for path in self._base.glob("*.json"):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    rec = json.load(f)
-                if (rec.get("project_id") or "").strip() == project_id:
-                    _validate_guardrails(rec)
-                    records.append(rec)
-            except (json.JSONDecodeError, RuntimeError):
+        for rel_path in self._storage.list_paths(self._prefix):
+            rec = self._storage.load_json(rel_path)
+            if rec is None:
                 continue
+            if (rec.get("project_id") or "").strip() != project_id:
+                continue
+            if "record_hash" not in rec:
+                raise RuntimeError("Stored record missing integrity hash.")
+            if compute_record_hash(rec) != rec["record_hash"]:
+                raise RuntimeError("Integrity check failed: record modified after save.")
+            _validate_guardrails(rec)
+            self._verify_chain(rec)
+            records.append(rec)
         records.sort(key=lambda r: r.get("created_at") or "")
         return records
 

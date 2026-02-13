@@ -37,9 +37,11 @@ export default function Signup() {
       return;
     }
     setLoading(true);
+    setError('');
     try {
-      await apiSignup(email.trim().toLowerCase(), password, (name || '').trim(), (organisation || '').trim());
-      navigate('/login', { replace: true, state: { fromSignup: true } });
+      const data = await apiSignup(email.trim().toLowerCase(), password, (name || '').trim(), (organisation || '').trim());
+      const msg = data.message || 'Check your email to verify your account before logging in.';
+      navigate('/login', { replace: true, state: { fromSignup: true, signupMessage: msg } });
     } catch (err) {
       setError(err.message || 'Sign up failed.');
     } finally {

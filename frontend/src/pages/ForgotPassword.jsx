@@ -1,19 +1,25 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { apiRequestPasswordReset } from '../services/api';
 
 export default function ForgotPassword() {
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setError('');
     setLoading(true);
-    // Placeholder: no backend password reset yet. Show confirmation for UX.
-    setTimeout(() => {
+    try {
+      await apiRequestPasswordReset(email.trim().toLowerCase());
       setSent(true);
+    } catch (err) {
+      setError(err.message || 'Failed to send reset link.');
+    } finally {
       setLoading(false);
-    }, 800);
+    }
   };
 
   if (sent) {
@@ -23,11 +29,11 @@ export default function ForgotPassword() {
           <h1 className="font-heading text-2xl font-bold text-slate-900 mb-2">Check your email</h1>
           <p className="text-slate-600 mb-6">
             If an account exists for {email}, we’ve sent instructions to reset your password.
-            Password reset is not yet connected to a server—contact your administrator for access.
+            The link expires in 1 hour.
           </p>
           <Link
             to="/login"
-            className="inline-block py-2 px-4 rounded-lg bg-slate-200 text-slate-800 font-medium hover:bg-slate-300"
+            className="inline-block py-2 px-4 rounded-lg bg-amber-500 text-slate-900 font-medium hover:bg-amber-400"
           >
             Back to sign in
           </Link>
@@ -44,6 +50,11 @@ export default function ForgotPassword() {
           Enter your email and we’ll send you a link to reset your password.
         </p>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {error && (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm">
+              {error}
+            </div>
+          )}
           <div>
             <label htmlFor="reset-email" className="block text-sm font-medium text-slate-700 mb-1">
               Email

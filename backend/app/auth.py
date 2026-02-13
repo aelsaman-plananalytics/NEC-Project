@@ -57,3 +57,23 @@ def get_user_by_id(db: Session, user_id: int) -> Optional[User]:
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email.strip().lower()).first()
+
+
+def get_user_by_verification_token(db: Session, token: str) -> Optional[User]:
+    if not (token or token.strip()):
+        return None
+    return (
+        db.query(User)
+        .filter(User.email_verification_token == token.strip())
+        .first()
+    )
+
+
+def get_user_by_password_reset_token(db: Session, token: str) -> Optional[User]:
+    if not (token or token.strip()):
+        return None
+    return (
+        db.query(User)
+        .filter(User.password_reset_token == token.strip())
+        .first()
+    )

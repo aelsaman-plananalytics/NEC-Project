@@ -1,5 +1,5 @@
 """
-End-to-end API tests for POST /api/validate_programme.
+End-to-end API tests for POST /api/v1/validate_programme.
 
 Proves that lifecycle inputs (submission_stage, planner_assumptions) do NOT alter
 acceptability. Authoritative fields come only from the validator.
@@ -107,7 +107,7 @@ def test_validate_programme_api_scenario_a_not_acceptable(
     ]
 
     response = client.post(
-        "/api/validate_programme",
+        "/api/v1/validate_programme",
         files={
             "xer_file": ("programme.xer", BytesIO(XER_NO_TEMPORARY_WORKS), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
@@ -174,7 +174,7 @@ def test_validate_programme_api_scenario_b_acceptable(
     json_bytes = json.dumps(contract_with_tw).encode("utf-8")
 
     response = client.post(
-        "/api/validate_programme",
+        "/api/v1/validate_programme",
         files={
             "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
@@ -199,3 +199,121 @@ def test_validate_programme_api_scenario_b_acceptable(
         )
         if tw_readiness:
             assert tw_readiness.get("aligned") is True
+
+
+# --- Step 5A API hardening tests ---
+
+
+def test_idempotency_same_key_same_payload_returns_identical_response(
+    client: TestClient,
+    contract_with_tw: dict,
+):
+    """Same Idempotency-Key + same request payload returns identical previous response without re-running validation."""
+    json_bytes = json.dumps(contract_with_tw).encode("utf-8")
+    key = "test-idem-same-payload"
+    headers = {"Idempotency-Key": key}
+    files1 = {
+        "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+        "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+    }
+    data1 = {"submission_stage_form": "initial"}
+    r1 = client.post("/api/v1/validate_programme", files=files1, data=data1, headers=headers)
+    assert r1.status_code == 200, r1.text
+    body1 = r1.json()
+    # Second request: same key, same payload (fresh BytesIO)
+    files2 = {
+        "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+        "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+    }
+    r2 = client.post("/api/v1/validate_programme", files=files2, data=data1, headers=headers)
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert body1 == body2, "Idempotent replay must return identical response"
+
+
+def test_idempotency_same_key_different_payload_returns_409(
+    client: TestClient,
+    contract_with_tw: dict,
+):
+    """Same Idempotency-Key with different request payload returns HTTP 409 and structured error."""
+    json_bytes = json.dumps(contract_with_tw).encode("utf-8")
+    key = "test-idem-different-payload"
+    headers = {"Idempotency-Key": key}
+    # First request
+    r1 = client.post(
+        "/api/v1/validate_programme",
+        files={
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+        },
+        data={"submission_stage_form": "initial"},
+        headers=headers,
+    )
+    assert r1.status_code == 200, r1.text
+    # Second request: same key, different payload (different XER - no Temporary Works)
+    r2 = client.post(
+        "/api/v1/validate_programme",
+        files={
+            "xer_file": ("programme.xer", BytesIO(XER_NO_TEMPORARY_WORKS), "application/octet-stream"),
+            "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+        },
+        data={"submission_stage_form": "initial"},
+        headers=headers,
+    )
+    assert r2.status_code == 409, r2.text
+    err = r2.json()
+    assert err.get("error_code") == "IDEMPOTENCY_CONFLICT"
+    assert "error_message" in err
+    assert "details" in err
+
+
+def test_error_responses_follow_structured_contract(client: TestClient):
+    """Error responses use { error_code, error_message, details }."""
+    # Send invalid payload: not an XER file
+    r = client.post(
+        "/api/v1/validate_programme",
+        files={
+            "xer_file": ("file.txt", BytesIO(b"not xer"), "text/plain"),
+            "json_file": ("c.json", BytesIO(b"{}"), "application/json"),
+        },
+    )
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body.get("error_code") == "BAD_REQUEST"
+    assert "error_message" in body
+    assert "details" in body
+
+
+def test_response_signature_present_and_deterministic(
+    client: TestClient,
+    contract_with_tw: dict,
+):
+    """Response includes response_signature; same payload yields same signature."""
+    json_bytes = json.dumps(contract_with_tw).encode("utf-8")
+    # First request
+    r1 = client.post(
+        "/api/v1/validate_programme",
+        files={
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+        },
+        data={"submission_stage_form": "initial"},
+    )
+    assert r1.status_code == 200, r1.text
+    body1 = r1.json()
+    assert "response_signature" in body1
+    sig1 = body1["response_signature"]
+    assert isinstance(sig1, str) and len(sig1) == 64 and all(c in "0123456789abcdef" for c in sig1)
+    # Second request (same payload): response_signature may vary (e.g. timestamp in hash input)
+    r2 = client.post(
+        "/api/v1/validate_programme",
+        files={
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+        },
+        data={"submission_stage_form": "initial"},
+    )
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    sig2 = body2.get("response_signature")
+    assert isinstance(sig2, str) and len(sig2) == 64 and all(c in "0123456789abcdef" for c in sig2)
