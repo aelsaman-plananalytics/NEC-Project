@@ -2016,12 +2016,15 @@ class ComprehensiveValidator:
 
         # (activity_id, name_lower, wbs_path) for evidence and hard-coded rules (e.g. Temporary Works)
         activity_rows: List[tuple] = []
+        activity_id_to_name: Dict[str, str] = {}
         for act in activities:
             aid = (act.get("id") or act.get("task_id") or "").strip()
             name = (act.get("name") or act.get("task_name") or "").strip()
             wbs_path = (act.get("wbs_path") or "").strip()
             if aid or name:
                 activity_rows.append((aid, name.lower(), wbs_path))
+            if aid:
+                activity_id_to_name[aid] = name
         activity_rows.sort(key=lambda x: (x[0] or ""))
 
         programme_constraint_texts: List[str] = []
@@ -2331,6 +2334,10 @@ class ComprehensiveValidator:
                 required_action = None
 
             clause_ref = clause_refs[0] if clause_refs else ""
+            evidence_activities = [
+                {"activity_id": aid, "activity_name": activity_id_to_name.get(aid) or str(aid)}
+                for aid in evidence_ids
+            ]
             obligations_report.append({
                 "id": ob_id,
                 "original_contract_text": primary_text,
@@ -2345,6 +2352,7 @@ class ComprehensiveValidator:
                 "evidenced_by_activities": evidenced_by_activities,
                 "evidenced": evidenced_by_activities,
                 "evidence_activity_ids": evidence_ids,
+                "evidence_activities": evidence_activities,
                 "evidence_mode": ob.get("evidence_mode"),
                 "required_action": required_action,
                 "acknowledged": acknowledged,

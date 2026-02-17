@@ -92,6 +92,10 @@ COVERAGE_NONE = "Not represented"
 CONFIDENCE_HIGH = "High confidence"
 CONFIDENCE_MODERATE = "Moderate confidence"
 CONFIDENCE_JUDGEMENT_REQUIRED = "Judgement required"
+# Report labels: High / Medium / Low for PDF clarity (no calculation change).
+CONFIDENCE_LABEL_HIGH = "High"
+CONFIDENCE_LABEL_MEDIUM = "Medium"
+CONFIDENCE_LABEL_LOW = "Low"
 
 # Activity load transparency: threshold above which we add an informational note (obligations per activity).
 ACTIVITY_LOAD_THRESHOLD = 4
@@ -179,6 +183,20 @@ def build_validation_report(data: Dict[str, Any]) -> Dict[str, Any]:
     section_a = _section_a(validation_summary, metadata, programme_stage_context)
     user_confirmations_section = _section_user_confirmations(_safe_list(_safe_get(data, "user_confirmations")))
 
+    # Read-only float analytics (descriptive only; does not affect acceptability)
+    from app.reporting.float_analytics import (
+        compute_float_profile,
+        build_activity_float_details,
+        activity_float_details_truncated,
+        build_appendix_float_trimmed,
+    )
+    float_profile = _safe_dict(_safe_get(data, "float_profile"))
+    if not float_profile:
+        float_profile = compute_float_profile(programme_summary)
+    activity_float_details = build_activity_float_details(programme_summary, max_rows=1000)
+    activity_float_table_truncated = activity_float_details_truncated(programme_summary, max_rows=1000)
+    appendix_float_trimmed = build_appendix_float_trimmed(programme_summary)
+
     return {
         "section_a_executive_summary": section_a,
         "section_b_what_determined_outcome": section_b,
@@ -191,6 +209,10 @@ def build_validation_report(data: Dict[str, Any]) -> Dict[str, Any]:
         "section_h_next_steps": _section_h_next_steps(pcm, validation_summary, risks),
         "section_what_to_review_next": _section_what_to_review_next(scope_sec, section_d, validation_summary),
         "section_user_confirmations_and_notes": user_confirmations_section,
+        "float_profile": float_profile,
+        "activity_float_details": activity_float_details,
+        "activity_float_table_truncated": activity_float_table_truncated,
+        "appendix_float_trimmed": appendix_float_trimmed,
         "metadata": {
             "report_title": "Programme Validation Report",
             "contract_file": _safe_str(_safe_get(metadata, "contract_file"), "—"),
@@ -247,7 +269,7 @@ def _section_what_to_review_next(
         items.append("Some scope items have implicit programme coverage; you may wish to add more explicit activities as the programme develops.")
 
     # Judgement-required required activities (missing or unclear)
-    judgement_required = sum(1 for r in required_table if _safe_dict(r).get("confidence_band") == CONFIDENCE_JUDGEMENT_REQUIRED)
+    judgement_required = sum(1 for r in required_table if _safe_dict(r).get("confidence_band") == CONFIDENCE_LABEL_LOW)
     if judgement_required and acceptability != "ACCEPTABLE":
         items.append("Required activities that are not yet shown should be added so the programme can be accepted at this stage.")
 
@@ -361,7 +383,6 @@ def _section_b(alignment: Dict[str, Any], validation_summary: Dict[str, Any]) ->
         ("key_dates", "Key dates"),
         ("programme_submission", "Programme submission cycle"),
         ("delay_damages_alignment", "Delay damages alignment"),
-        ("weather_alignment", "Weather data arrangements"),
     ]
 
     def _clean(text: str) -> str:
@@ -443,17 +464,58 @@ def _section_scope_contract_alignment(
     activity_load_notes: List[str] = []
 
     if obligation_entities_used:
+        # Build id→name map from programme so we can show activity names even when evidence_activities is missing (e.g. older runs)
+        activity_id_to_name: Dict[str, str] = {}
+        ps = _safe_dict(programme_summary)
+        for item in _safe_list(_safe_get(ps, "activities")):
+            it = _safe_dict(item) if not isinstance(item, dict) else item
+            aid = str(_safe_get(it, "id") or _safe_get(it, "task_id") or "").strip()
+            name = (_safe_get(it, "name") or _safe_get(it, "task_name") or _safe_get(it, "activity_name") or "").strip()
+            if aid:
+                activity_id_to_name[aid] = name or aid  # keep id as fallback if name empty
+
         # HARD RULE: Scope and constraints reporting MUST be derived ONLY from obligation_entities. No legacy scope_items, no PCM, no implicit/assurance/confidence language from legacy engine.
         scope_evidence_table = _safe_list(_safe_get(scope_coverage, "scope_evidence_table"))
         for row in scope_evidence_table:
             r = _safe_dict(row)
+            # Translate to activities: show activity name (presentation only; engine unchanged)
+            _max_show = 10
+            ea = _safe_list(r.get("evidence_activities"))
+            ids = list(r.get("evidence_activity_ids") or [])[:20]
+            if ea:
+                programme_activities = []
+                for a in ea[:_max_show]:
+                    name = (a.get("activity_name") or "").strip()
+                    programme_activities.append(name or str(a.get("activity_id", "")))
+                if len(ea) > _max_show:
+                    programme_activities.append(f"(+{len(ea) - _max_show} more)")
+            else:
+                # Fallback: resolve IDs to names using programme_summary when evidence_activities not present
+                programme_activities = [activity_id_to_name.get(str(x), str(x)) for x in ids[:_max_show]]
+                if len(ids) > _max_show:
+                    programme_activities.append(f"(+{len(ids) - _max_show} more)")
+            rep_status = r.get("representation_status_label") or r.get("representation_status", "") or ""
+            rep_raw = (r.get("representation_status") or "").strip().lower()
+            # Obligation path: internal status values (evidenced, explicit_assumption, etc.) → High/Medium/Low
+            if rep_raw in ("evidenced", "acknowledged", "explicit_assumption"):
+                conf_band = CONFIDENCE_LABEL_HIGH
+            elif rep_raw in ("assurance_based", "covered_by_later_submission"):
+                conf_band = CONFIDENCE_LABEL_MEDIUM
+            elif rep_raw in ("not_represented_but_mandatory", "not_represented"):
+                conf_band = CONFIDENCE_LABEL_LOW
+            elif "Explicit" in str(rep_status) or rep_status == COVERAGE_EXPLICIT:
+                conf_band = CONFIDENCE_LABEL_HIGH
+            elif "Implicit" in str(rep_status) or "Assurance" in str(rep_status) or rep_status in (COVERAGE_IMPLICIT, COVERAGE_ASSURANCE):
+                conf_band = CONFIDENCE_LABEL_MEDIUM
+            else:
+                conf_band = CONFIDENCE_LABEL_LOW
             scope_rows.append({
                 "contract_scope": r.get("text") or r.get("original_contract_text", ""),
-                "programme_activities": list(r.get("evidence_activity_ids") or [])[:20],
-                "representation_status": r.get("representation_status_label") or r.get("representation_status", ""),
+                "programme_activities": programme_activities,
+                "representation_status": rep_status,
                 "evidence_role": "Scope alignment",
                 "notes": r.get("evidence_sufficient_reason") or "",
-                "confidence_band": "From obligation alignment",
+                "confidence_band": conf_band,
             })
         constraints_control = _safe_list(_safe_get(scope_coverage, "constraints_control"))
         for row in constraints_control:
@@ -463,7 +525,7 @@ def _section_scope_contract_alignment(
                 "programme_evidence": "Evidenced in programme constraints or sequencing." if r.get("acknowledged") else "—",
                 "handling": "Explicit in programme" if r.get("acknowledged") else "Implicitly managed",
                 "evidence_role": "Constraint alignment",
-                "confidence_band": "From obligation alignment",
+                "confidence_band": CONFIDENCE_LABEL_MEDIUM,
             })
         scope_summary = (
             "Scope and constraints are assessed from obligation alignment only. "
@@ -586,11 +648,11 @@ def _section_scope_contract_alignment(
 
             # Confidence band: descriptive only; does not affect acceptability.
             if row_status == COVERAGE_EXPLICIT:
-                confidence_band = CONFIDENCE_HIGH
+                confidence_band = CONFIDENCE_LABEL_HIGH
             elif row_status in (COVERAGE_IMPLICIT, COVERAGE_ASSURANCE):
-                confidence_band = CONFIDENCE_MODERATE
+                confidence_band = CONFIDENCE_LABEL_MEDIUM
             else:
-                confidence_band = CONFIDENCE_JUDGEMENT_REQUIRED
+                confidence_band = CONFIDENCE_LABEL_LOW
 
             scope_rows.append({
                 "contract_scope": scope_text,
@@ -647,11 +709,11 @@ def _section_scope_contract_alignment(
             if evidence:
                 handling = "Explicit in programme"
                 programme_evidence = ", ".join(evidence[:3]) + ("…" if len(evidence) > 3 else "")
-                confidence_band = CONFIDENCE_HIGH
+                confidence_band = CONFIDENCE_LABEL_HIGH
             else:
                 handling = "Implicitly managed"
                 programme_evidence = "— (managed through general site controls)"
-                confidence_band = CONFIDENCE_MODERATE
+                confidence_band = CONFIDENCE_LABEL_MEDIUM
             constraint_rows.append({
                 "constraint": constraint_text,
                 "programme_evidence": programme_evidence,
@@ -901,9 +963,9 @@ def _section_d(pcm: Dict[str, Any], alignment: Dict[str, Any]) -> Dict[str, Any]
         # Confidence band: descriptive only; does not affect acceptability.
         if status == "FOUND":
             basis = _safe_get(entry, "matching_basis") or ""
-            confidence_band = CONFIDENCE_HIGH if (basis and "explicit" in str(basis).lower()) else CONFIDENCE_MODERATE
+            confidence_band = CONFIDENCE_LABEL_HIGH if (basis and "explicit" in str(basis).lower()) else CONFIDENCE_LABEL_MEDIUM
         else:
-            confidence_band = CONFIDENCE_JUDGEMENT_REQUIRED
+            confidence_band = CONFIDENCE_LABEL_LOW
         required_rows.append({
             "contract_activity": requirement,
             "when_required": expectation_text,
@@ -1016,7 +1078,6 @@ def _section_f(alignment: Dict[str, Any]) -> Dict[str, Any]:
     align = _safe_dict(alignment)
     information_items: List[str] = []
     for key, label in [
-        ("weather_alignment", "Weather data arrangements"),
         ("programme_submission", "Programme submission and review cycle"),
     ]:
         entry = _safe_dict(_safe_get(align, key))
@@ -1038,7 +1099,7 @@ def _section_g(alignment: Dict[str, Any], nec_detailed: Dict[str, Any]) -> Dict[
     align = _safe_dict(alignment)
     nec = _safe_dict(nec_detailed)
     mapping_rows: List[Dict[str, str]] = []
-    for key in ["starting_date", "completion_date", "possession_dates", "key_dates", "delay_damages_alignment", "weather_alignment"]:
+    for key in ["starting_date", "completion_date", "possession_dates", "key_dates", "delay_damages_alignment"]:
         entry = _safe_dict(_safe_get(align, key))
         if entry:
             mapping_rows.append({

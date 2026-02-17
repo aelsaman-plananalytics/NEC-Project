@@ -557,6 +557,12 @@ async def validate_programme(
         # Response signature (deterministic from normalized JSON; does not affect acceptability)
         output_dict["response_signature"] = _response_signature(output_dict)
 
+        # Read-only schedule analytics (descriptive only; does not affect acceptability or response_signature)
+        from app.reporting.float_analytics import compute_float_profile
+        fp = compute_float_profile(output_dict.get("programme_summary") or {})
+        if fp is not None:
+            output_dict["float_profile"] = fp
+
         # Run lifecycle: update run to completed and attach validation_result
         if analysis_run_id is not None:
             _run = db.query(AnalysisRun).filter(

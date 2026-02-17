@@ -7,16 +7,46 @@ Converts analysis JSON into professional markdown and PDF reports.
 import os
 import re
 import html
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 from textwrap import wrap
 from io import BytesIO
 
+# Primavera stores total float in hours; convert to working days for report display.
+WORKING_HOURS_PER_DAY = 8
+
 
 def _escape(s: str) -> str:
     """Escape for HTML display."""
     return html.escape(str(s)) if s is not None else ""
+
+
+def _presentation_text(s: Any) -> str:
+    """Presentation-only wording replacements for report output (no logic change)."""
+    if s is None:
+        return ""
+    t = str(s)
+    # Full sentence (e.g. Section B "What we saw"): plain, direct wording
+    t = t.replace(
+        "Different representations noted (date format or value); see notes for detail.",
+        "The contract and programme show a slight difference in date or value here. See the notes below for details."
+    )
+    t = t.replace("Different representations noted", "Inconsistent representations identified.")
+    return t
+
+
+def _confidence_display(s: Any) -> str:
+    """Presentation only: show confidence column as High, Medium, or Low."""
+    if s is None:
+        return "—"
+    t = str(s).strip().lower()
+    if "high" in t or t == "high":
+        return "High"
+    if "low" in t or "judgement" in t or t == "low":
+        return "Low"
+    return "Medium"
 
 
 def _safe_dict(val: Any, default: Optional[dict] = None) -> dict:
@@ -78,7 +108,8 @@ def _cell_para(styles, text: str, font_size: int = 8, max_chars: Optional[int] =
 
 try:
     from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
+    from reportlab.lib.utils import ImageReader
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
     from reportlab.lib import colors
@@ -92,6 +123,8 @@ except ImportError:
     Paragraph = None
     Spacer = None
     PageBreak = None
+    Image = None
+    ImageReader = None
     getSampleStyleSheet = None
     ParagraphStyle = None
     inch = None
@@ -117,6 +150,125 @@ except ImportError:
     Pt = None
     RGBColor = None
     WD_ALIGN_PARAGRAPH = None
+
+
+def _extract_float_stats_from_validation(json_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Extract float from validation_result (programme_summary.activities).
+    Raw values are in hours (Primavera default); convert to working days for display.
+    Ignore None, exclude negative. Presentation only.
+    """
+    activities = (json_data.get("programme_summary") or {}).get("activities") or []
+    float_days_list: List[float] = []
+    for act in activities:
+        if not isinstance(act, dict):
+            continue
+        val = act.get("float") if act.get("float") is not None else act.get("total_float")
+        if val is None:
+            continue
+        try:
+            raw_float = float(val)
+        except (TypeError, ValueError):
+            continue
+        if raw_float < 0:
+            continue
+        float_days_list.append(round(raw_float / WORKING_HOURS_PER_DAY, 1))
+
+    if not float_days_list:
+        return None
+
+    total_activities = len(float_days_list)
+    critical_count = sum(1 for f in float_days_list if f == 0)
+    under_40_count = sum(1 for f in float_days_list if f < 40)
+    over_40_count = sum(1 for f in float_days_list if f >= 40)
+    max_float = round(max(float_days_list), 1)
+    sorted_f = sorted(float_days_list)
+    mid = total_activities // 2
+    median_float = round(
+        (sorted_f[mid] if total_activities % 2 else (sorted_f[mid - 1] + sorted_f[mid]) / 2.0),
+        1,
+    )
+    critical_pct = round(100.0 * critical_count / total_activities, 1) if total_activities else 0
+    under_40_pct = round(100.0 * under_40_count / total_activities, 1) if total_activities else 0
+    over_40_pct = round(100.0 * over_40_count / total_activities, 1) if total_activities else 0
+
+    # Bins: [0-10], [10-20], [20-40], [40-80], [80-160], [160-365], [365+] (days)
+    bucket_labels = ["0–10", "10–20", "20–40", "40–80", "80–160", "160–365", "365+"]
+    histogram = [0] * 7
+    for f_val in float_days_list:
+        if f_val <= 10:
+            histogram[0] += 1
+        elif f_val <= 20:
+            histogram[1] += 1
+        elif f_val <= 40:
+            histogram[2] += 1
+        elif f_val <= 80:
+            histogram[3] += 1
+        elif f_val <= 160:
+            histogram[4] += 1
+        elif f_val <= 365:
+            histogram[5] += 1
+        else:
+            histogram[6] += 1
+
+    return {
+        "total_activities": total_activities,
+        "critical_count": critical_count,
+        "under_40_count": under_40_count,
+        "over_40_count": over_40_count,
+        "max_float": max_float,
+        "median_float": median_float,
+        "critical_pct": critical_pct,
+        "under_40_pct": under_40_pct,
+        "over_40_pct": over_40_pct,
+        "histogram_buckets": bucket_labels,
+        "histogram_counts": histogram,
+    }
+
+
+def _render_float_histogram_png(float_stats: Dict[str, Any]) -> Optional[BytesIO]:
+    """
+    Generate Float Distribution Profile histogram. Bins: 0–10, 10–20, 20–40, 40–80, 80–160, 160–365, 365+.
+    White background, neutral style, light grey grid. Presentation only.
+    """
+    if not float_stats or not isinstance(float_stats, dict):
+        return None
+    buckets = float_stats.get("histogram_buckets") or []
+    counts = float_stats.get("histogram_counts") or []
+    if not buckets or not counts or len(buckets) != len(counts):
+        return None
+    try:
+        import matplotlib  # type: ignore[import-untyped]
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt  # type: ignore[import-untyped]
+    except ImportError as e:
+        import logging
+        logging.getLogger(__name__).warning("[Schedule Float] matplotlib not available: %s", e)
+        return None
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("black")
+    ax.spines["bottom"].set_color("black")
+    ax.tick_params(colors="black")
+    ax.set_title("Float Distribution Profile", fontsize=11, color="black")
+    ax.yaxis.grid(True, color="#cccccc", linestyle="-", linewidth=0.5)
+    ax.set_axisbelow(True)
+    x_pos = list(range(len(buckets)))
+    ax.bar(x_pos, counts, color="#5a6c7d", edgecolor="black", linewidth=0.5)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(buckets, fontsize=9)
+    ax.set_xlabel("Total Float (Days)", fontsize=10, color="black")
+    ax.set_ylabel("Number of Activities", fontsize=10, color="black")
+    ax.set_ylim(bottom=0)
+    plt.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
 class ReportGenerator:
@@ -1315,6 +1467,7 @@ class ReportGenerator:
         report = report if isinstance(report, dict) else {}
         if not REPORTLAB_AVAILABLE:
             raise ImportError("ReportLab not available")
+        histogram_temp_path = None  # for cleanup after build (Schedule Float image)
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=72)
         story = []
@@ -1433,7 +1586,7 @@ class ReportGenerator:
                 r = _safe_row(row)
                 table_data.append([
                     _p(r.get("requirement", ""), 80),
-                    _p(r.get("observation", ""), 120),
+                    _p(_presentation_text(r.get("observation", "")), 120),
                     _p(r.get("action", ""), 120),
                 ])
             t = Table(table_data, colWidths=[1.5*inch, 2.3*inch, 2.3*inch], repeatRows=1)
@@ -1452,14 +1605,24 @@ class ReportGenerator:
 
         # Section — Scope and constraints coverage
         scope_sec = _sec("section_scope_contract_alignment")
-        story.append(Paragraph("How the programme reflects the contract scope and constraints", styles['Heading2']))
+        story.append(Paragraph("How scope and constraints are assessed", styles['Heading2']))
         story.append(Spacer(1, 10))
-        if scope_sec.get("scope_client_note"):
-            story.append(Paragraph(f"<i>{scope_sec.get('scope_client_note')}</i>", styles['Normal']))
-            story.append(Spacer(1, 8))
-        if scope_sec.get("scope_summary"):
-            story.append(Paragraph(scope_sec.get("scope_summary"), styles['Normal']))
-            story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            "The programme is reviewed against the contract scope and constraints. "
+            "Each contractual requirement is checked to confirm whether it is clearly represented in the programme activities or sequencing. "
+            "Where a requirement is not represented, it is highlighted below.",
+            styles['Normal']
+        ))
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("<b>Confidence level</b>", styles['Heading3']))
+        story.append(Paragraph(
+            "Confidence levels reflect how clearly programme activities demonstrate alignment with contractual obligations:",
+            styles['Normal']
+        ))
+        story.append(Paragraph("High – Direct, explicit programme evidence supports the obligation.", styles['Normal']))
+        story.append(Paragraph("Medium – Programme evidence is present but indirect or inferred.", styles['Normal']))
+        story.append(Paragraph("Low – Limited or unclear programme evidence.", styles['Normal']))
+        story.append(Spacer(1, 6))
         scope_rows_raw = scope_sec.get("scope_rows", []) or []
         scope_rows = []
         for row in scope_rows_raw:
@@ -1474,22 +1637,21 @@ class ReportGenerator:
                 })
         if scope_rows:
             story.append(Paragraph("<b>Contract scope evidence</b>", styles['Heading3']))
-            story.append(Paragraph("<i>Evidence in this table is used to demonstrate scope alignment.</i>", styles['Normal']))
             story.append(Spacer(1, 6))
             table_data = [
-                [_p("Contract scope item"), _p("Programme evidence"), _p("Coverage strength"), _p("Notes"), _p("Confidence")]
+                [_p("Contract scope item"), _p("Programme activities"), _p("Coverage strength"), _p("Notes"), _p("Confidence")]
             ]
             for row in scope_rows[:25]:
                 r = _safe_row(row)
                 pa = r.get("programme_activities", [])
                 pa = pa if isinstance(pa, list) else ([pa] if pa is not None else [])
-                programme_evidence = ", ".join(str(x) for x in pa if x) or "—"
+                programme_evidence = "\n".join(f"• {x}" for x in pa if x) or "—"
                 table_data.append([
                     _p(r.get("contract_scope", ""), 90),
                     _p(programme_evidence, 70),
                     _p(r.get("representation_status", ""), 60),
-                    _p(r.get("notes", ""), 100),
-                    _p(r.get("confidence_band", ""), 38),
+                    _p(_presentation_text(r.get("notes", "")), 100),
+                    _p(_confidence_display(r.get("confidence_band", "")), 38),
                 ])
             t = Table(table_data, colWidths=[2.1*inch, 1.6*inch, 1.4*inch, 2.1*inch, 1.0*inch], repeatRows=1)
             t.setStyle(_validation_table_style())
@@ -1501,11 +1663,10 @@ class ReportGenerator:
                 for note in activity_load_notes[:10]:
                     story.append(Paragraph(f"• {note}", styles['Normal']))
             story.append(Spacer(1, 10))
-        # Evidence-first: list evidenced, explicit assumption, not-represented-but-mandatory, and assurance-based
+        # Evidence-first: list evidenced, explicit assumption, not-represented-but-mandatory (governance section omitted)
         obligations_evidenced_list = scope_sec.get("obligations_evidenced_list") or []
         obligations_explicit_assumption_list = scope_sec.get("obligations_explicit_assumption_list") or []
         obligations_not_represented_but_mandatory_list = scope_sec.get("obligations_not_represented_but_mandatory_list") or []
-        obligations_assurance_based_list = scope_sec.get("obligations_assurance_based_list") or []
         if obligations_evidenced_list:
             story.append(Paragraph("<b>Obligations evidenced by programme</b>", styles['Heading3']))
             story.append(Paragraph("The following obligations are evidenced by programme activities or constraints.", styles['Normal']))
@@ -1537,13 +1698,7 @@ class ReportGenerator:
                 o = ob if isinstance(ob, dict) else {}
                 story.append(Paragraph(f"• [{o.get('id', '')}] {o.get('text', '')}", styles['Normal']))
             story.append(Spacer(1, 6))
-        if obligations_assurance_based_list:
-            story.append(Paragraph("<b>Requires governance / future submission</b>", styles['Heading3']))
-            story.append(Paragraph("The following are assurance-based; they do not count as evidence. They must be surfaced for governance or future submission.", styles['Normal']))
-            for ob in obligations_assurance_based_list[:30]:
-                o = ob if isinstance(ob, dict) else {}
-                story.append(Paragraph(f"• [{o.get('id', '')}] {o.get('text', '')}", styles['Normal']))
-            story.append(Spacer(1, 10))
+        # Requires governance / future submission section removed from report output.
         if scope_sec.get("constraint_summary"):
             story.append(Paragraph(scope_sec.get("constraint_summary"), styles['Normal']))
             story.append(Spacer(1, 6))
@@ -1560,7 +1715,6 @@ class ReportGenerator:
                 })
         if constraint_rows:
             story.append(Paragraph("<b>Constraint coverage</b>", styles['Heading3']))
-            story.append(Paragraph("<i>Evidence in this table is used to demonstrate constraint alignment.</i>", styles['Normal']))
             story.append(Spacer(1, 6))
             table_data = [
                 [_p("Constraint"), _p("Programme evidence"), _p("Handling"), _p("Confidence")]
@@ -1571,7 +1725,7 @@ class ReportGenerator:
                     _p(r.get("constraint", ""), 90),
                     _p(r.get("programme_evidence", ""), 80),
                     _p(r.get("handling", ""), 50),
-                    _p(r.get("confidence_band", ""), 38),
+                    _p(_confidence_display(r.get("confidence_band", "")), 38),
                 ])
             t = Table(table_data, colWidths=[2.5*inch, 2.4*inch, 1.0*inch, 1.0*inch], repeatRows=1)
             t.setStyle(_validation_table_style())
@@ -1599,57 +1753,17 @@ class ReportGenerator:
                 _p(r.get("item", ""), 50),
                 _p(r.get("contract", ""), 36),
                 _p(r.get("programme", ""), 36),
-                _p(r.get("notes", ""), 70),
+                _p(_presentation_text(r.get("notes", "")), 70),
             ])
         t = Table(table_data, colWidths=[1.4*inch, 1.3*inch, 1.3*inch, 2*inch], repeatRows=1)
         t.setStyle(_validation_table_style())
         story.append(t)
         story.append(Spacer(1, 8))
-        variance = (c.get('variance_explanation') or '')[:500]
+        variance = _presentation_text(c.get('variance_explanation') or '')[:500]
         story.append(Paragraph(f"<i>Variance explanation:</i> {variance}", styles['Normal']))
         story.append(Spacer(1, 20))
 
-        # Section D — Required Activities & Completion Gates
-        story.append(Paragraph("Section D — Required Activities & Completion Gates", styles['Heading2']))
-        story.append(Spacer(1, 10))
-        d = _sec("section_d_required_activities_and_gates")
-        if d.get("section_intro"):
-            story.append(Paragraph(d.get("section_intro"), styles['Normal']))
-            story.append(Spacer(1, 8))
-        story.append(Paragraph("<i>Evidence in this section is used to demonstrate programme acceptability.</i>", styles['Normal']))
-        story.append(Spacer(1, 6))
-        story.append(Paragraph("<b>Required activities</b>", styles['Heading3']))
-        ra = d.get("required_activities_table", []) or []
-        table_data = [[_p("Contract activity"), _p("When it is required"), _p("Shown in the programme"), _p("Notes"), _p("Confidence")]]
-        for r in ra[:15]:
-            r = _safe_row(r)
-            table_data.append([
-                _p(_redact(r.get("contract_activity", r.get("activity_or_gate", ""))), 90),
-                _p(r.get("when_required", ""), 55),
-                _p(r.get("shown_in_programme", ""), 45),
-                _p(r.get("notes", r.get("evidence", "")), 75),
-                _p(r.get("confidence_band", ""), 38),
-            ])
-        if len(table_data) > 1:
-            t = Table(table_data, colWidths=[2.0*inch, 1.4*inch, 1.2*inch, 2.0*inch, 1.0*inch], repeatRows=1)
-            t.setStyle(_validation_table_style())
-            story.append(t)
-        story.append(Spacer(1, 8))
-        story.append(Paragraph("<b>Completion gates</b>", styles['Heading3']))
-        gate_rows = d.get("completion_gates_table", []) or []
-        table_data2 = [[_p("Activity / gate"), _p("Status"), _p("Evidence")]]
-        for r in gate_rows[:15]:
-            r = _safe_row(r)
-            table_data2.append([
-                _p(_redact(r.get("activity_or_gate", "")), 100),
-                _p(r.get("status", ""), 30),
-                _p(r.get("evidence", ""), 80),
-            ])
-        if len(table_data2) > 1:
-            t2 = Table(table_data2, colWidths=[2.5*inch, 1*inch, 2.5*inch], repeatRows=1)
-            t2.setStyle(_validation_table_style())
-            story.append(t2)
-        story.append(Spacer(1, 20))
+        # Section D (Required activities) removed for clarity — not included in PDF output.
 
         # Section E — Programme Quality & Realism (Advisory)
         story.append(Paragraph("Section E — Programme confidence and observations", styles['Heading2']))
@@ -1707,6 +1821,65 @@ class ReportGenerator:
         story.append(Paragraph(f"<i>Methodology:</i> {methodology}", styles['Normal']))
         story.append(Spacer(1, 20))
 
+        # Section E — Schedule Float Profile (presentation only; does not affect acceptability)
+        float_stats = _extract_float_stats_from_validation(json_data)
+        if float_stats:
+            story.append(Paragraph("Section E — Schedule Float Profile", styles['Heading2']))
+            story.append(Spacer(1, 10))
+            story.append(Paragraph("<b>Summary Statistics</b>", styles['Heading3']))
+            story.append(Spacer(1, 6))
+            total = float_stats.get("total_activities", 0)
+            critical_count = float_stats.get("critical_count", 0)
+            critical_pct = float_stats.get("critical_pct", 0)
+            under_40 = float_stats.get("under_40_count", 0)
+            under_40_pct = float_stats.get("under_40_pct", 0)
+            over_40 = float_stats.get("over_40_count", 0)
+            over_40_pct = float_stats.get("over_40_pct", 0)
+            max_f = float_stats.get("max_float", 0)
+            med_f = float_stats.get("median_float", 0)
+            story.append(Paragraph(
+                f"• Total activities analysed: {total}<br/>"
+                f"• Critical (0 float): {critical_count} ({critical_pct}%)<br/>"
+                f"• Under 40 days: {under_40} ({under_40_pct}%)<br/>"
+                f"• 40 days or more: {over_40} ({over_40_pct}%)<br/>"
+                f"• Maximum float observed: {max_f} days<br/>"
+                f"• Median float: {med_f} days",
+                styles['Normal']
+            ))
+            story.append(Spacer(1, 12))
+            story.append(Paragraph("<b>Float Distribution</b>", styles['Heading3']))
+            story.append(Spacer(1, 6))
+            hist_buf = _render_float_histogram_png(float_stats)
+            if hist_buf and REPORTLAB_AVAILABLE and Image is not None:
+                try:
+                    hist_buf.seek(0)
+                    # Use temp file for ReportLab Image (more reliable than BytesIO in some environments)
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as _tmp:
+                        _tmp.write(hist_buf.read())
+                        histogram_temp_path = _tmp.name
+                    img = Image(histogram_temp_path, width=4.75*inch, height=2.8*inch)
+                    story.append(img)
+                    story.append(Spacer(1, 10))
+                except Exception as _e:
+                    import logging
+                    logging.getLogger(__name__).warning("[Schedule Float] Failed to embed histogram image: %s", _e)
+                    if histogram_temp_path and os.path.exists(histogram_temp_path):
+                        try:
+                            os.unlink(histogram_temp_path)
+                        except Exception:
+                            pass
+                    histogram_temp_path = None
+            elif not hist_buf and float_stats:
+                import logging
+                logging.getLogger(__name__).info("[Schedule Float] Histogram not generated (install matplotlib to show graph).")
+            story.append(Paragraph(
+                "The float distribution shows how scheduling flexibility is spread across the programme. "
+                "Activities with low float (particularly under 40 days) are more sensitive to delay and may influence completion. "
+                "A high proportion of activities with very large float values typically indicates that project completion is driven by a limited number of controlling tasks, while other activities are not currently schedule-critical.",
+                styles['Normal']
+            ))
+            story.append(Spacer(1, 20))
+
         # Section H — Next steps
         story.append(Paragraph("Section H — Next steps", styles['Heading2']))
         story.append(Spacer(1, 10))
@@ -1743,11 +1916,37 @@ class ReportGenerator:
                 story.append(Paragraph(f"• [{ts}] {note}", styles['Normal']))
             story.append(Spacer(1, 20))
 
+        # Appendix A — Activity Float Details (critical + top 5 highest only; no full dump)
+        appendix_float = report.get("appendix_float_trimmed") or []
+        if appendix_float:
+            story.append(Paragraph("Appendix A — Activity Float Details", styles['Heading2']))
+            story.append(Spacer(1, 10))
+            story.append(Paragraph("Critical activities (0 float) and top 5 highest float activities.", styles['Normal']))
+            story.append(Spacer(1, 6))
+            table_data = [[_p("Activity Name"), _p("Total Float (days)"), _p("Critical (Yes/No)")]]
+            for row in appendix_float:
+                r = _safe_row(row)
+                table_data.append([
+                    _p(r.get("activity_name", ""), 100),
+                    _p(r.get("total_float_days", ""), 22),
+                    _p("Yes" if r.get("critical") else "No", 12),
+                ])
+            if len(table_data) > 1:
+                t = Table(table_data, colWidths=[3.2*inch, 1.2*inch, 1.0*inch], repeatRows=1)
+                t.setStyle(_validation_table_style())
+                story.append(t)
+            story.append(Spacer(1, 20))
+
         # Footer with version (branding only)
         footer_style = ParagraphStyle('FooterVersion', parent=styles['Normal'], fontSize=8, textColor=colors.grey, spaceBefore=24)
         story.append(Paragraph("NEC Engineering Analysis Report v1.0 — Programme validation output. Acceptability is determined under NEC Clause 31.", footer_style))
 
         doc.build(story)
+        if histogram_temp_path and os.path.exists(histogram_temp_path):
+            try:
+                os.unlink(histogram_temp_path)
+            except Exception:
+                pass
         pdf_bytes = buffer.getvalue()
         buffer.close()
         if output_path:
@@ -1801,14 +2000,19 @@ class ReportGenerator:
                 r[2].text = str(rw.get("source_clause", ""))[:30]
                 r[3].text = str(rw.get("explanation", ""))[:60]
         scope_sec = _safe_dict(report.get("section_scope_contract_alignment"))
-        doc.add_heading("How the programme reflects the contract scope and constraints", 1)
-        if scope_sec.get("scope_client_note"):
-            p = doc.add_paragraph()
-            p.add_run(scope_sec.get("scope_client_note")).italic = True
-        if scope_sec.get("scope_summary"):
-            doc.add_paragraph(scope_sec.get("scope_summary"))
-        p = doc.add_paragraph()
-        p.add_run("Evidence in this table is used to demonstrate scope alignment.").italic = True
+        doc.add_heading("How scope and constraints are assessed", 1)
+        doc.add_paragraph(
+            "The programme is reviewed against the contract scope and constraints. "
+            "Each contractual requirement is checked to confirm whether it is clearly represented in the programme activities or sequencing. "
+            "Where a requirement is not represented, it is highlighted below."
+        )
+        doc.add_paragraph("Confidence level", style="Heading 3")
+        doc.add_paragraph(
+            "Confidence levels reflect how clearly programme activities demonstrate alignment with contractual obligations:"
+        )
+        doc.add_paragraph("High – Direct, explicit programme evidence supports the obligation.", style="List Bullet")
+        doc.add_paragraph("Medium – Programme evidence is present but indirect or inferred.", style="List Bullet")
+        doc.add_paragraph("Low – Limited or unclear programme evidence.", style="List Bullet")
         scope_rows_raw = scope_sec.get("scope_rows", []) or []
         scope_rows = []
         for row in scope_rows_raw:
@@ -1827,7 +2031,7 @@ class ReportGenerator:
             header = table.rows[0].cells
             header[0].text, header[1].text, header[2].text, header[3].text = (
                 "Contract scope item",
-                "Programme evidence",
+                "Programme activities",
                 "Coverage strength",
                 "Notes",
             )
@@ -1836,10 +2040,10 @@ class ReportGenerator:
                 r[0].text = str(row.get("contract_scope", ""))[:120]
                 pa = row.get("programme_activities", [])
                 pa = pa if isinstance(pa, list) else ([pa] if pa is not None else [])
-                programme_evidence = ", ".join(str(x) for x in pa if x) or "—"
-                r[1].text = programme_evidence[:120]
+                programme_evidence = "\n".join(f"• {x}" for x in pa if x) or "—"
+                r[1].text = programme_evidence[:500]
                 r[2].text = str(row.get("representation_status", ""))[:50]
-                r[3].text = str(row.get("notes", ""))[:160]
+                r[3].text = _presentation_text(row.get("notes", ""))[:160]
         al_notes = scope_sec.get("activity_load_notes") or []
         if al_notes:
             doc.add_paragraph("Activity load transparency", style="Heading 3")
@@ -1848,7 +2052,6 @@ class ReportGenerator:
         obligations_evidenced_list = scope_sec.get("obligations_evidenced_list") or []
         obligations_explicit_assumption_list = scope_sec.get("obligations_explicit_assumption_list") or []
         obligations_not_represented_but_mandatory_list = scope_sec.get("obligations_not_represented_but_mandatory_list") or []
-        obligations_assurance_based_list = scope_sec.get("obligations_assurance_based_list") or []
         if obligations_evidenced_list:
             doc.add_paragraph("Obligations evidenced by programme", style="Heading 3")
             doc.add_paragraph("The following obligations are evidenced by programme activities or constraints.")
@@ -1877,16 +2080,9 @@ class ReportGenerator:
             for ob in obligations_not_represented_but_mandatory_list[:30]:
                 o = ob if isinstance(ob, dict) else {}
                 doc.add_paragraph(f"• [{o.get('id', '')}] {o.get('text', '')}", style="List Bullet")
-        if obligations_assurance_based_list:
-            doc.add_paragraph("Requires governance / future submission", style="Heading 3")
-            doc.add_paragraph("Assurance-based; do not count as evidence. Surface for governance or future submission.")
-            for ob in obligations_assurance_based_list[:30]:
-                o = ob if isinstance(ob, dict) else {}
-                doc.add_paragraph(f"• [{o.get('id', '')}] {o.get('text', '')}", style="List Bullet")
+        # Requires governance / future submission section removed from report output.
         if scope_sec.get("constraint_summary"):
             doc.add_paragraph(scope_sec.get("constraint_summary"))
-        p = doc.add_paragraph()
-        p.add_run("Evidence in this table is used to demonstrate constraint alignment.").italic = True
         constraint_rows_raw = scope_sec.get("constraint_rows", []) or []
         constraint_rows = []
         for row in constraint_rows_raw:
@@ -1931,21 +2127,9 @@ class ReportGenerator:
             row.cells[0].text = str(rw.get("item", ""))[:30]
             row.cells[1].text = str(rw.get("contract", ""))[:25]
             row.cells[2].text = str(rw.get("programme", ""))[:25]
-            row.cells[3].text = str(rw.get("notes", ""))[:40]
-        doc.add_paragraph(f"Variance explanation: {c.get('variance_explanation', '')[:600]}")
-        doc.add_heading("Section D — Required Activities & Completion Gates", 1)
-        d = _safe_dict(report.get("section_d_required_activities_and_gates"))
-        if d.get("section_intro"):
-            doc.add_paragraph(d.get("section_intro"))
-        p = doc.add_paragraph()
-        p.add_run("Evidence in this section is used to demonstrate programme acceptability.").italic = True
-        for ra in d.get("required_activities_table", [])[:15] or []:
-            rw = _safe_row(ra)
-            doc.add_paragraph(f"• {rw.get('activity_or_gate', rw.get('contract_activity', ''))}: {rw.get('status', rw.get('shown_in_programme', ''))} — {rw.get('evidence', rw.get('notes', ''))}", style="List Bullet")
-        doc.add_paragraph("Completion gates:")
-        for gate in d.get("completion_gates_table", [])[:15] or []:
-            gw = _safe_row(gate)
-            doc.add_paragraph(f"• {gw.get('activity_or_gate', '')}: {gw.get('status', '')}", style="List Bullet")
+            row.cells[3].text = _presentation_text(rw.get("notes", ""))[:40]
+        doc.add_paragraph(f"Variance explanation: {_presentation_text(c.get('variance_explanation', ''))[:600]}")
+        # Section D (Required activities) removed — not included in report output.
         doc.add_heading("Section E — Programme Quality & Realism (Advisory)", 1)
         e = _safe_dict(report.get("section_e_quality_realism_advisory"))
         if e.get("section_intro"):
@@ -1987,7 +2171,6 @@ class ReportGenerator:
         a = _safe_dict(report.get("section_a_executive_summary"))
         b = _safe_dict(report.get("section_b_what_determined_outcome"))
         c = _safe_dict(report.get("section_c_dates"))
-        d = _safe_dict(report.get("section_d_required_activities_and_gates"))
         e = _safe_dict(report.get("section_e_quality_realism_advisory"))
         f_sec = _safe_dict(report.get("section_f_excluded_from_scoring"))
         g = _safe_dict(report.get("section_g_traceability_appendix"))
@@ -2017,12 +2200,19 @@ class ReportGenerator:
                 html_parts.append(f"<tr><td>{_escape(rw.get('requirement',''))}</td><td>{_escape(rw.get('outcome',''))}</td><td>{_escape(rw.get('source_clause',''))}</td><td>{_escape(rw.get('explanation',''))[:80]}</td></tr>")
             html_parts.append("</table>")
         scope_sec = _safe_dict(report.get("section_scope_contract_alignment"))
-        html_parts.append("<h2>How the programme reflects the contract scope and constraints</h2>")
-        if scope_sec.get("scope_client_note"):
-            html_parts.append(f"<p><em>{_escape(scope_sec.get('scope_client_note'))}</em></p>")
-        if scope_sec.get("scope_summary"):
-            html_parts.append(f"<p>{_escape(scope_sec.get('scope_summary'))}</p>")
-        html_parts.append("<p><em>Evidence in this table is used to demonstrate scope alignment.</em></p>")
+        html_parts.append("<h2>How scope and constraints are assessed</h2>")
+        html_parts.append(
+            "<p>The programme is reviewed against the contract scope and constraints. "
+            "Each contractual requirement is checked to confirm whether it is clearly represented in the programme activities or sequencing. "
+            "Where a requirement is not represented, it is highlighted below.</p>"
+        )
+        html_parts.append("<h3>Confidence level</h3>")
+        html_parts.append(
+            "<p>Confidence levels reflect how clearly programme activities demonstrate alignment with contractual obligations:</p>"
+            "<ul><li>High – Direct, explicit programme evidence supports the obligation.</li>"
+            "<li>Medium – Programme evidence is present but indirect or inferred.</li>"
+            "<li>Low – Limited or unclear programme evidence.</li></ul>"
+        )
         scope_rows_raw = scope_sec.get("scope_rows", []) or []
         scope_rows = []
         for row in scope_rows_raw:
@@ -2036,17 +2226,17 @@ class ReportGenerator:
                     "notes": "",
                 })
         if scope_rows:
-            html_parts.append("<h3>Contract scope evidence</h3><table><tr><th>Contract scope item</th><th>Programme evidence</th><th>Coverage strength</th><th>Notes</th></tr>")
+            html_parts.append("<h3>Contract scope evidence</h3><table><tr><th>Contract scope item</th><th>Programme activities</th><th>Coverage strength</th><th>Notes</th></tr>")
             for row in scope_rows:
                 pa = row.get("programme_activities", [])
                 pa = pa if isinstance(pa, list) else ([pa] if pa is not None else [])
-                programme_evidence = ", ".join(str(x) for x in pa if x) or "—"
+                programme_evidence = "<br/>".join(f"• {_escape(x)}" for x in pa if x) or "—"
                 html_parts.append(
                     "<tr>"
                     f"<td>{_escape(row.get('contract_scope',''))}</td>"
-                    f"<td>{_escape(programme_evidence)}</td>"
+                    f"<td>{programme_evidence}</td>"
                     f"<td>{_escape(row.get('representation_status',''))}</td>"
-                    f"<td>{_escape(row.get('notes',''))}</td>"
+                    f"<td>{_escape(_presentation_text(row.get('notes','')))}</td>"
                     "</tr>"
                 )
             html_parts.append("</table>")
@@ -2058,7 +2248,6 @@ class ReportGenerator:
                 html_parts.append("</ul>")
         if scope_sec.get("constraint_summary"):
             html_parts.append(f"<p>{_escape(scope_sec.get('constraint_summary'))}</p>")
-        html_parts.append("<p><em>Evidence in this table is used to demonstrate constraint alignment.</em></p>")
         constraint_rows_raw = scope_sec.get("constraint_rows", []) or []
         constraint_rows = []
         for row in constraint_rows_raw:
@@ -2092,22 +2281,10 @@ class ReportGenerator:
         html_parts.append("<table><tr><th>Item</th><th>Contract</th><th>Programme</th><th>Notes</th></tr>")
         for r in c.get("rows", []) or []:
             rw = _safe_row(r)
-            html_parts.append(f"<tr><td>{_escape(rw.get('item',''))}</td><td>{_escape(rw.get('contract',''))}</td><td>{_escape(rw.get('programme',''))}</td><td>{_escape(rw.get('notes',''))[:50]}</td></tr>")
+            html_parts.append(f"<tr><td>{_escape(rw.get('item',''))}</td><td>{_escape(rw.get('contract',''))}</td><td>{_escape(rw.get('programme',''))}</td><td>{_escape(_presentation_text(rw.get('notes','')))[:50]}</td></tr>")
         html_parts.append("</table>")
-        html_parts.append(f"<p><em>Variance explanation:</em> {_escape(c.get('variance_explanation',''))}</p>")
-        html_parts.append("<h2>Section D — Required Activities & Completion Gates</h2>")
-        if d.get("section_intro"):
-            html_parts.append(f"<p>{_escape(d.get('section_intro'))}</p>")
-        html_parts.append("<p><em>Evidence in this section is used to demonstrate programme acceptability.</em></p>")
-        html_parts.append("<h3>Required activities</h3><table><tr><th>Activity / gate</th><th>Status</th><th>Evidence</th></tr>")
-        for r in d.get("required_activities_table", []) or []:
-            rw = _safe_row(r)
-            html_parts.append(f"<tr><td>{_escape(rw.get('activity_or_gate', rw.get('contract_activity','')))}</td><td>{_escape(rw.get('status', rw.get('shown_in_programme','')))}</td><td>{_escape(rw.get('evidence', rw.get('notes','')))}</td></tr>")
-        html_parts.append("</table><h3>Completion gates</h3><table><tr><th>Activity / gate</th><th>Status</th><th>Evidence</th></tr>")
-        for r in d.get("completion_gates_table", []) or []:
-            rw = _safe_row(r)
-            html_parts.append(f"<tr><td>{_escape(rw.get('activity_or_gate',''))}</td><td>{_escape(rw.get('status',''))}</td><td>{_escape(rw.get('evidence',''))}</td></tr>")
-        html_parts.append("</table>")
+        html_parts.append(f"<p><em>Variance explanation:</em> {_escape(_presentation_text(c.get('variance_explanation','')))}</p>")
+        # Section D (Required activities) removed — not included in report output.
         html_parts.append("<h2>Section E — Programme Quality & Realism (Advisory)</h2>")
         if e.get("section_intro"):
             html_parts.append(f"<p>{_escape(e.get('section_intro'))}</p>")

@@ -28,6 +28,7 @@ Pillow>=10.0.0  # Image processing
 
 # Report Generation Dependencies
 reportlab>=4.0.0  # PDF generation (Windows-compatible)
+matplotlib>=3.8.0  # Schedule Float Profile histogram (PDF)
 
 # Scheduler (retention every 24h)
 APScheduler>=3.10.0
