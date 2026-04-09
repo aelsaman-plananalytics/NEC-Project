@@ -103,7 +103,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware configuration
+# Security hardening: request size limit, rate limit, API key, audit log (API layer only)
+from app.security_middleware import SecurityMiddleware
+app.add_middleware(SecurityMiddleware)
+
+# CORS middleware configuration (must be outermost so it can short-circuit preflight OPTIONS)
 origins = [
     "http://localhost:3000",
     "http://localhost:5173",
@@ -117,10 +121,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Security hardening: request size limit, rate limit, API key, audit log (API layer only)
-from app.security_middleware import SecurityMiddleware
-app.add_middleware(SecurityMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
