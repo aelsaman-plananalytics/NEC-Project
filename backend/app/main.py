@@ -163,9 +163,21 @@ app.include_router(validate_programme.router)
 app.include_router(full_review.router)
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/", include_in_schema=False)
 async def index(request: Request):
-    """Home page with links to upload forms."""
+    """
+    Root endpoint.
+
+    - API clients (e.g. Render health checks) get JSON.
+    - Browsers get the existing HTML landing page.
+    """
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept or "*/*" in accept:
+        return {
+            "status": "ok",
+            "service": "NEC Engineering Analysis System",
+            "message": "API is running",
+        }
     return templates.TemplateResponse("index.html", {"request": request})
 
 
