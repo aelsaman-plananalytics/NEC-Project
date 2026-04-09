@@ -20,7 +20,7 @@ from app.p6_engine.obligation_entities import EVIDENCE_MODE_PHRASE, EVIDENCE_MOD
 
 
 def _contract_phrase_and_wbs_only():
-    """Contract with Obligation A (PHRASE), Obligation B (WBS_ONLY), and Temporary Works (WBS_ONLY), all mandatory."""
+    """Contract with Obligation A (PHRASE) and Obligation B (WBS_ONLY), both mandatory."""
     return {
         "obligation_entities": {
             "obligations": [
@@ -48,18 +48,6 @@ def _contract_phrase_and_wbs_only():
                     "scope_classification": "ACTION_REQUIRED",
                     "evidence_mode": EVIDENCE_MODE_WBS_ONLY,
                 },
-                {
-                    "id": "OBL-036",
-                    "original_contract_text": "Temporary Works",
-                    "original_contract_texts": ["Temporary Works"],
-                    "canonical_name": "Temporary Works",
-                    "canonical_match_string": "temporary works",
-                    "clause_references": [],
-                    "facets": {"has_scope_component": True, "has_programme_duty": False, "has_governance_requirement": False, "has_timing_requirement": False},
-                    "mandatory_for_acceptance": True,
-                    "scope_classification": "ACTION_REQUIRED",
-                    "evidence_mode": EVIDENCE_MODE_WBS_ONLY,
-                },
             ],
             "validation_error": None,
         },
@@ -71,21 +59,18 @@ def _contract_phrase_and_wbs_only():
 
 def _programme_phrase_evidence_both_wbs_only_a():
     """
-    Programme: phrase evidence for A and B; WBS match only for A and Temporary Works (not B).
+    Programme: phrase evidence for A and B; WBS match only for A (not B).
     - WBS "Programme submission" → A evidenced (phrase + WBS).
-    - WBS "Temporary Works" → Temporary Works evidenced (WBS_ONLY).
     - No "utilities diversions" in WBS or activity name → B must NOT be evidenced (WBS_ONLY).
     """
     return {
         "activities": [
             {"task_id": "1", "task_name": "Programme submission draft", "wbs_id": "1"},
             {"task_id": "2", "task_name": "Diversion works", "wbs_id": "2"},
-            {"task_id": "3", "task_name": "TW activity", "wbs_id": "3"},
         ],
         "wbs": [
             {"wbs_id": "1", "parent_wbs_id": "", "wbs_name": "Programme submission"},
             {"wbs_id": "2", "parent_wbs_id": "", "wbs_name": "Works"},
-            {"wbs_id": "3", "parent_wbs_id": "", "wbs_name": "Temporary Works"},
         ],
         "calendars": [],
         "logic": [],
@@ -111,7 +96,7 @@ def test_evidence_modes_phrase_aligned_wbs_only_not_aligned_not_acceptable():
 
     scope_cov = output.get("nec_alignment", {}).get("scope_coverage") or {}
     obligations_report = scope_cov.get("obligations_report") or []
-    assert len(obligations_report) >= 3
+    assert len(obligations_report) >= 2
 
     ob_a = next((o for o in obligations_report if o.get("id") == "OBL-A"), None)
     ob_b = next((o for o in obligations_report if o.get("id") == "OBL-B"), None)
@@ -136,17 +121,15 @@ def test_evidence_modes_phrase_aligned_wbs_only_not_aligned_not_acceptable():
 
 
 def _contract_planner_workflow():
-    """Contract with one PHRASE mandatory (Programme submission) and one WBS_ONLY mandatory (Temporary Works)."""
-    from app.p6_engine.frozen_requirements import build_frozen_requirements
+    """Contract with one PHRASE mandatory (Programme submission) and one WBS_ONLY mandatory (Utilities Diversions)."""
     contract_data = {
+        "obligation_entities": {"obligations": [], "validation_error": None},
         "scope_items": [],
         "programme_compliance_model": {},
         "constraints": [],
     }
-    frozen = build_frozen_requirements(contract_data)
-    contract_data["obligation_entities"] = frozen["obligation_entities"]
-    obligations = list((contract_data["obligation_entities"].get("obligations") or []))
-    obligations.insert(0, {
+    obligations = []
+    obligations.append({
         "id": "OBL-PHRASE",
         "original_contract_text": "Programme submission",
         "original_contract_texts": ["Programme submission"],
@@ -158,12 +141,24 @@ def _contract_planner_workflow():
         "scope_classification": "ACTION_REQUIRED",
         "evidence_mode": EVIDENCE_MODE_PHRASE,
     })
+    obligations.append({
+        "id": "OBL-WBS",
+        "original_contract_text": "Utilities Diversions",
+        "original_contract_texts": ["Utilities Diversions"],
+        "canonical_name": "Utilities Diversions",
+        "canonical_match_string": "utilities diversions",
+        "clause_references": [],
+        "facets": {"has_scope_component": True, "has_programme_duty": False, "has_governance_requirement": False, "has_timing_requirement": False},
+        "mandatory_for_acceptance": True,
+        "scope_classification": "ACTION_REQUIRED",
+        "evidence_mode": EVIDENCE_MODE_WBS_ONLY,
+    })
     contract_data["obligation_entities"] = {"obligations": obligations, "validation_error": None}
     return contract_data
 
 
 def _programme_a_phrase_only():
-    """Satisfies PHRASE obligation only (Programme submission); no Temporary Works in WBS/name."""
+    """Satisfies PHRASE obligation only (Programme submission); no Utilities Diversions in WBS/name."""
     return {
         "activities": [
             {"task_id": "1", "task_name": "Programme submission draft", "wbs_id": "1"},
@@ -177,15 +172,15 @@ def _programme_a_phrase_only():
 
 
 def _programme_b_both():
-    """Satisfies both: Programme submission (phrase/WBS) and Temporary Works (WBS)."""
+    """Satisfies both: Programme submission (phrase/WBS) and Utilities Diversions (WBS)."""
     return {
         "activities": [
             {"task_id": "1", "task_name": "Programme submission draft", "wbs_id": "1"},
-            {"task_id": "2", "task_name": "TW activity", "wbs_id": "2"},
+            {"task_id": "2", "task_name": "Diversions activity", "wbs_id": "2"},
         ],
         "wbs": [
             {"wbs_id": "1", "parent_wbs_id": "", "wbs_name": "Programme submission"},
-            {"wbs_id": "2", "parent_wbs_id": "", "wbs_name": "Temporary Works"},
+            {"wbs_id": "2", "parent_wbs_id": "", "wbs_name": "Utilities Diversions"},
         ],
         "calendars": [],
         "logic": [],
@@ -208,19 +203,19 @@ def test_planner_workflow_phrase_only_fails_both_pass():
     output_a = validator.validate(contract_data, _programme_a_phrase_only())
     vs_a = output_a.get("validation_summary") or {}
     assert vs_a.get("acceptability_status") != "ACCEPTABLE", (
-        "Programme A must NOT be ACCEPTABLE when only PHRASE obligation is satisfied (WBS_ONLY Temporary Works missing)."
+        "Programme A must NOT be ACCEPTABLE when only PHRASE obligation is satisfied (WBS_ONLY Utilities Diversions missing)."
     )
     scope_cov_a = output_a.get("nec_alignment", {}).get("scope_coverage") or {}
     assert scope_cov_a.get("obligation_entities_used") is True, "Obligation engine must be used (no legacy)."
     failure_reasons_a = vs_a.get("acceptability_failure_reasons") or []
-    assert any("temporary works" in r.lower() or "not represented" in r.lower() for r in failure_reasons_a), (
-        "Failure reasons must mention the missing mandatory obligation (Temporary Works)."
+    assert any("utilities diversions" in r.lower() or "not represented" in r.lower() for r in failure_reasons_a), (
+        "Failure reasons must mention the missing mandatory obligation (Utilities Diversions)."
     )
     not_rep = scope_cov_a.get("obligations_not_represented_but_mandatory") or []
-    tw_not_rep = next((o for o in not_rep if (o.get("original_contract_text") or "").strip().lower() == "temporary works"), None)
-    assert tw_not_rep is not None
-    assert tw_not_rep.get("required_action"), "Unaligned mandatory obligation must have required_action for planners."
-    assert "temporary works" in (tw_not_rep.get("canonical_match_string") or "").lower()
+    wbs_not_rep = next((o for o in not_rep if (o.get("original_contract_text") or "").strip().lower() == "utilities diversions"), None)
+    assert wbs_not_rep is not None
+    assert wbs_not_rep.get("required_action"), "Unaligned mandatory obligation must have required_action for planners."
+    assert "utilities diversions" in (wbs_not_rep.get("canonical_match_string") or "").lower()
 
     # Programme B: both
     output_b = validator.validate(contract_data, _programme_b_both())

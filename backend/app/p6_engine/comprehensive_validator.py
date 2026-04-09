@@ -936,20 +936,6 @@ class ComprehensiveValidator:
             contract_data["programme_compliance_model"] = None
             contract_data["required_activities"] = []
 
-        # Mandatory-obligation existence assertion (contract completeness; does not decide acceptability).
-        if obligation_entities_used:
-            obligations_list = (contract_data.get("obligation_entities") or {}).get("obligations") or []
-            mandatory_names = {
-                (o.get("canonical_name") or o.get("original_contract_text") or "").strip().lower()
-                for o in obligations_list
-                if o.get("mandatory_for_acceptance")
-            }
-            if "temporary works" not in mandatory_names:
-                raise RuntimeError(
-                    "FATAL: Mandatory obligation 'Temporary Works' is missing from obligation_entities. "
-                    "This indicates a contract analysis / obligation construction failure."
-                )
-
         # Extract data once
         contract_summary = self._extract_contract_clauses(contract_data)
         programme_summary = self._extract_programme_data(p6_data)

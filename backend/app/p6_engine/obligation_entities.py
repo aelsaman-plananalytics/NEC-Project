@@ -176,11 +176,6 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
         text = _original_text_from_item(item)
         add(text, _clause_reference_from_item(item), FACET_GOVERNANCE, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None, None)
 
-    # NEC common requirement: inject Temporary Works if not already present. Configure semantics at construction (no text-based detection).
-    tw_sig = _obligation_signature("Temporary Works")
-    if not any(_obligation_signature(t) == tw_sig for t, *_ in raw):
-        add("Temporary Works", "", FACET_SCOPE, True, SCOPE_CLASSIFICATION_ACTION_REQUIRED, EVIDENCE_MODE_WBS_ONLY, "temporary works", None)
-
     # Group by signature and merge
     by_signature: Dict[str, List[RawItem]] = {}
     for item in raw:

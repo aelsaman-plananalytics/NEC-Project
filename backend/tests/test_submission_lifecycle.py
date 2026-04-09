@@ -23,7 +23,18 @@ from app.p6_engine.submission_lifecycle import (
 
 
 def _contract_with_temporary_works():
-    contract_data = {"scope_items": [], "programme_compliance_model": {}, "constraints": []}
+    contract_data = {
+        "scope_items": [
+            {
+                "text": "Utilities Diversions",
+                "mandatory_for_acceptance": True,
+                "evidence_mode": "WBS_ONLY",
+                "canonical_match_string": "utilities diversions",
+            }
+        ],
+        "programme_compliance_model": {},
+        "constraints": [],
+    }
     frozen = build_frozen_requirements(contract_data)
     contract_data["obligation_entities"] = frozen["obligation_entities"]
     return contract_data
@@ -46,7 +57,7 @@ def test_lifecycle_prep_does_not_change_acceptability():
 
 
 def test_programme_evolution_not_acceptable_then_acceptable():
-    """Same contract: programme without TW → NOT ACCEPTABLE; programme with TW → ACCEPTABLE."""
+    """Same contract: programme without obligation → NOT ACCEPTABLE; programme with obligation → ACCEPTABLE."""
     contract_data = _contract_with_temporary_works()
     validator = ComprehensiveValidator()
     p6_no_tw = {
@@ -57,11 +68,11 @@ def test_programme_evolution_not_acceptable_then_acceptable():
     p6_with_tw = {
         "activities": [
             {"task_id": "1", "task_name": "Design", "wbs_id": "1"},
-            {"task_id": "2", "task_name": "TW activity", "wbs_id": "2"},
+            {"task_id": "2", "task_name": "Diversions activity", "wbs_id": "2"},
         ],
         "wbs": [
             {"wbs_id": "1", "parent_wbs_id": "", "wbs_name": "Design"},
-            {"wbs_id": "2", "parent_wbs_id": "", "wbs_name": "Temporary Works"},
+            {"wbs_id": "2", "parent_wbs_id": "", "wbs_name": "Utilities Diversions"},
         ],
         "calendars": [], "logic": [], "constraints": [], "metadata": {},
     }
@@ -72,13 +83,13 @@ def test_programme_evolution_not_acceptable_then_acceptable():
 
 
 def test_assumptions_do_not_bypass_wbs_only():
-    """Planner assumption 'covered by later submission' on Temporary Works does NOT make programme ACCEPTABLE."""
+    """Planner assumption 'covered by later submission' on a WBS_ONLY obligation does NOT make programme ACCEPTABLE."""
     contract_data = _contract_with_temporary_works()
     obligations = list((contract_data["obligation_entities"].get("obligations") or []))
-    tw_id = next((o["id"] for o in obligations if (o.get("original_contract_text") or "").strip().lower() == "temporary works"), None)
-    assert tw_id
+    ob_id = next((o["id"] for o in obligations if (o.get("original_contract_text") or "").strip().lower() == "utilities diversions"), None)
+    assert ob_id
     contract_data = prepare_contract_for_validation(contract_data, None, [
-        {"obligation_id": tw_id, "assumption_type": "covered_by_later_submission", "rationale": "To be submitted later"},
+        {"obligation_id": ob_id, "assumption_type": "covered_by_later_submission", "rationale": "To be submitted later"},
     ])
     p6_no_tw = {
         "activities": [{"task_id": "1", "task_name": "Design", "wbs_id": "1"}],
@@ -88,7 +99,7 @@ def test_assumptions_do_not_bypass_wbs_only():
     validator = ComprehensiveValidator()
     out = validator.validate(contract_data, p6_no_tw)
     assert out.get("validation_summary", {}).get("acceptability_status") != "ACCEPTABLE", (
-        "WBS_ONLY (Temporary Works) cannot be satisfied by 'covered by later submission'; programme must still FAIL."
+        "WBS_ONLY obligation cannot be satisfied by 'covered by later submission'; programme must still FAIL."
     )
 
 
@@ -107,9 +118,9 @@ def test_obligation_readiness_computed():
     assert len(readiness) == len(obligations)
     for r in readiness:
         assert "obligation_id" in r and "required_now" in r and "required_from_stage" in r
-    tw_readiness = next((r for r in readiness if "temporary" in (r.get("obligation_name") or "").lower()), None)
-    assert tw_readiness is not None
-    assert tw_readiness["required_now"] is True  # no required_from_stage => required from first
+    ob_readiness = next((r for r in readiness if "utilities" in (r.get("obligation_name") or "").lower()), None)
+    assert ob_readiness is not None
+    assert ob_readiness["required_now"] is True  # no required_from_stage => required from first
 
 
 def test_stage_activation_deactivates_later_obligations():

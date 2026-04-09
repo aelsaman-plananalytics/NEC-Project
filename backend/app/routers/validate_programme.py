@@ -372,10 +372,9 @@ async def validate_programme(
 
         # LIFECYCLE INVARIANT: All obligation entities MUST be rebuilt at validation time using current
         # obligation-construction logic. Validation must NEVER trust obligation_entities stored in
-        # the uploaded or latest analysis JSON (they were built at analysis time and can be stale or
-        # predate logic changes e.g. mandatory Temporary Works). Rebuilding here ensures mandatory
-        # obligations always appear in obligations_report, programmes missing them FAIL acceptability,
-        # and scope & constraints sections reflect the same single source of truth.
+        # the uploaded or latest analysis JSON (they were built at analysis time and can be stale).
+        # Rebuilding here ensures obligations_report is derived from the current contract extraction
+        # and that programmes missing mandatory obligations FAIL acceptability (single source of truth).
         try:
             frozen = build_frozen_requirements(contract_data)
             contract_data["obligation_entities"] = frozen["obligation_entities"]

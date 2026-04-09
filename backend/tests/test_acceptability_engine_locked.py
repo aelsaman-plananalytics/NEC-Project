@@ -14,10 +14,21 @@ from app.p6_engine.comprehensive_validator import ComprehensiveValidator
 from app.p6_engine.obligation_entities import EVIDENCE_MODE_WBS_ONLY, EVIDENCE_MODE_PHRASE
 
 
-def _contract_temporary_works_mandatory():
-    """Contract with only Temporary Works (mandatory, WBS_ONLY) — from frozen so it has canonical_match_string and evidence_mode at construction."""
+def _contract_wbs_only_mandatory(text: str = "Utilities Diversions"):
+    """Contract with one mandatory WBS_ONLY obligation built from scope_items (no injected obligations)."""
     from app.p6_engine.frozen_requirements import build_frozen_requirements
-    contract_data = {"scope_items": [], "programme_compliance_model": {}, "constraints": []}
+    contract_data = {
+        "scope_items": [
+            {
+                "text": text,
+                "mandatory_for_acceptance": True,
+                "evidence_mode": EVIDENCE_MODE_WBS_ONLY,
+                "canonical_match_string": text.lower(),
+            }
+        ],
+        "programme_compliance_model": {},
+        "constraints": [],
+    }
     frozen = build_frozen_requirements(contract_data)
     contract_data["obligation_entities"] = frozen["obligation_entities"]
     return contract_data
@@ -28,7 +39,7 @@ def test_phrase_pollution_guard_wbs_only_not_satisfied_by_works_or_temporary():
     WBS_ONLY obligation must NOT be satisfied by "works", "temporary", or partial phrase matches.
     Programme has activities with those words but NOT the full canonical_match_string in name or WBS → NOT ACCEPTABLE.
     """
-    contract_data = _contract_temporary_works_mandatory()
+    contract_data = _contract_wbs_only_mandatory("Utilities Diversions")
     p6_data = {
         "activities": [
             {"task_id": "1", "task_name": "Construction works", "wbs_id": "1"},
@@ -44,12 +55,12 @@ def test_phrase_pollution_guard_wbs_only_not_satisfied_by_works_or_temporary():
     output = validator.validate(contract_data, p6_data)
     vs = output.get("validation_summary") or {}
     assert vs.get("acceptability_status") != "ACCEPTABLE", (
-        "WBS_ONLY (Temporary Works) must NOT be satisfied by 'works' or 'temporary' alone; only full 'temporary works' in name or WBS."
+        "WBS_ONLY obligation must NOT be satisfied by partial phrase matches; only full canonical_match_string in name or WBS."
     )
     scope_cov = output.get("nec_alignment", {}).get("scope_coverage") or {}
     obligations_report = scope_cov.get("obligations_report") or []
-    tw = next((o for o in obligations_report if (o.get("original_contract_text") or "").strip().lower() == "temporary works"), None)
-    assert tw is not None and tw.get("evidenced_by_activities") is False
+    ob = next((o for o in obligations_report if (o.get("original_contract_text") or "").strip().lower() == "utilities diversions"), None)
+    assert ob is not None and ob.get("evidenced_by_activities") is False
 
 
 def test_obligation_metadata_integrity_wbs_only_without_canonical_match_string_fails():
@@ -112,7 +123,7 @@ def test_acceptability_invariant_mandatory_unaligned_implies_not_acceptable():
     """
     Any mandatory unaligned obligation → NOT ACCEPTABLE. No narrative or score may override.
     """
-    contract_data = _contract_temporary_works_mandatory()
+    contract_data = _contract_wbs_only_mandatory("Utilities Diversions")
     p6_data = {
         "activities": [{"task_id": "1", "task_name": "Design", "wbs_id": "1"}],
         "wbs": [{"wbs_id": "1", "parent_wbs_id": "", "wbs_name": "Design"}],
@@ -127,4 +138,4 @@ def test_acceptability_invariant_mandatory_unaligned_implies_not_acceptable():
     assert vs.get("acceptability_status") != "ACCEPTABLE"
     assert vs.get("overall_status") != "pass"
     failure_reasons = vs.get("acceptability_failure_reasons") or []
-    assert any("temporary works" in r.lower() or "not represented" in r.lower() for r in failure_reasons)
+    assert any("utilities diversions" in r.lower() or "not represented" in r.lower() for r in failure_reasons)

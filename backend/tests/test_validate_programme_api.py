@@ -8,6 +8,7 @@ See backend/ACCEPTABILITY_INVARIANT.md and app/api_contract.py.
 
 import json
 import pytest
+import uuid
 from io import BytesIO
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -20,8 +21,8 @@ _app = FastAPI()
 _app.include_router(validate_programme_router.router)
 
 
-# Minimal XER: one WBS "Design", one task. No Temporary Works.
-XER_NO_TEMPORARY_WORKS = b"""%T\tPROJWBS
+# Minimal XER: one WBS "Design", one task. No obligation.
+XER_NO_OBLIGATION = b"""%T\tPROJWBS
 %F\twbs_id\tparent_wbs_id\twbs_name
 %R\t1\t\tDesign
 %E\tPROJWBS
@@ -32,25 +33,32 @@ XER_NO_TEMPORARY_WORKS = b"""%T\tPROJWBS
 %E\tTASK
 """
 
-# Minimal XER: Design + Temporary Works WBS and task.
-XER_WITH_TEMPORARY_WORKS = b"""%T\tPROJWBS
+# Minimal XER: Design + Utilities Diversions WBS and task.
+XER_WITH_OBLIGATION = b"""%T\tPROJWBS
 %F\twbs_id\tparent_wbs_id\twbs_name
 %R\t1\t\tDesign
-%R\t2\t\tTemporary Works
+%R\t2\t\tUtilities Diversions
 %E\tPROJWBS
 
 %T\tTASK
 %F\ttask_id\ttask_name\twbs_id
 %R\t1\tDesign\t1
-%R\t2\tTW activity\t2
+%R\t2\tDiversions activity\t2
 %E\tTASK
 """
 
 
-def _contract_json_with_temporary_works():
-    """Contract that yields mandatory Temporary Works (WBS_ONLY). Same as test_temporary_works_obligation."""
+def _contract_json_with_mandatory_wbs_only_obligation():
+    """Contract with one mandatory WBS_ONLY obligation derived from scope_items (no injected obligations)."""
     contract_data = {
-        "scope_items": [],
+        "scope_items": [
+            {
+                "text": "Utilities Diversions",
+                "mandatory_for_acceptance": True,
+                "evidence_mode": "WBS_ONLY",
+                "canonical_match_string": "utilities diversions",
+            }
+        ],
         "programme_compliance_model": {},
         "constraints": [],
     }
@@ -59,14 +67,14 @@ def _contract_json_with_temporary_works():
     return contract_data
 
 
-def _temporary_works_obligation_id(contract_data):
+def _obligation_id(contract_data):
     obligations = (contract_data.get("obligation_entities") or {}).get("obligations") or []
-    tw = next(
-        (o for o in obligations if (o.get("original_contract_text") or "").strip() == "Temporary Works"),
+    ob = next(
+        (o for o in obligations if (o.get("original_contract_text") or "").strip() == "Utilities Diversions"),
         None,
     )
-    assert tw is not None, "Contract must include Temporary Works obligation"
-    return tw["id"]
+    assert ob is not None, "Contract must include the mandatory obligation"
+    return ob["id"]
 
 
 @pytest.fixture
@@ -76,12 +84,12 @@ def client():
 
 @pytest.fixture
 def contract_with_tw():
-    return _contract_json_with_temporary_works()
+    return _contract_json_with_mandatory_wbs_only_obligation()
 
 
 @pytest.fixture
 def tw_obligation_id(contract_with_tw):
-    return _temporary_works_obligation_id(contract_with_tw)
+    return _obligation_id(contract_with_tw)
 
 
 def test_validate_programme_api_scenario_a_not_acceptable(
@@ -90,13 +98,13 @@ def test_validate_programme_api_scenario_a_not_acceptable(
     tw_obligation_id: str,
 ):
     """
-    Scenario A: Contract includes mandatory Temporary Works (WBS_ONLY).
-    Programme does NOT include any WBS or activity with 'temporary works'.
+    Scenario A: Contract includes a mandatory WBS_ONLY obligation.
+    Programme does NOT include any WBS or activity with the obligation text.
     Call with submission_stage=initial and planner_assumptions=covered_by_later_submission.
 
     Assert:
     - acceptability_status == NOT_ACCEPTABLE
-    - Temporary Works appears in obligations_not_represented_but_mandatory
+    - Obligation appears in obligations_not_represented_but_mandatory
     - Assumption is visible in planner_assumptions_used
     - Assumption does NOT bypass WBS_ONLY
     - required_action is present and correct in obligation_readiness
@@ -109,7 +117,7 @@ def test_validate_programme_api_scenario_a_not_acceptable(
     response = client.post(
         "/api/v1/validate_programme",
         files={
-            "xer_file": ("programme.xer", BytesIO(XER_NO_TEMPORARY_WORKS), "application/octet-stream"),
+            "xer_file": ("programme.xer", BytesIO(XER_NO_OBLIGATION), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
         },
         data={
@@ -123,17 +131,17 @@ def test_validate_programme_api_scenario_a_not_acceptable(
 
     # Authoritative: must be NOT ACCEPTABLE (assumption does not satisfy WBS_ONLY)
     assert body.get("acceptability_status") == "NOT_ACCEPTABLE", (
-        "covered_by_later_submission must not bypass WBS_ONLY; programme without TW must be NOT_ACCEPTABLE"
+        "covered_by_later_submission must not bypass WBS_ONLY; programme without the obligation must be NOT_ACCEPTABLE"
     )
     assert body.get("overall_status") == "fail"
 
-    # Temporary Works must appear in obligations_not_represented_but_mandatory
+    # Obligation must appear in obligations_not_represented_but_mandatory
     not_rep = body.get("obligations_not_represented_but_mandatory") or []
-    tw_in_not_rep = any(
-        (r.get("original_contract_text") or "").strip() == "Temporary Works" or (r.get("id") == tw_obligation_id)
+    ob_in_not_rep = any(
+        (r.get("original_contract_text") or "").strip() == "Utilities Diversions" or (r.get("id") == tw_obligation_id)
         for r in not_rep
     )
-    assert tw_in_not_rep, "Temporary Works must appear in obligations_not_represented_but_mandatory"
+    assert ob_in_not_rep, "Mandatory obligation must appear in obligations_not_represented_but_mandatory"
 
     # Assumption visible in planner guidance (does not change acceptability)
     used = body.get("planner_assumptions_used") or []
@@ -142,14 +150,14 @@ def test_validate_programme_api_scenario_a_not_acceptable(
         for a in used
     ), "planner_assumptions_used must contain the submitted assumption"
 
-    # obligation_readiness: required_action present for TW
+    # obligation_readiness: required_action present for missing mandatory obligation
     readiness = body.get("obligation_readiness") or []
-    tw_readiness = next((r for r in readiness if r.get("obligation_id") == tw_obligation_id), None)
-    assert tw_readiness is not None
-    assert tw_readiness.get("required_now") is True
-    assert tw_readiness.get("aligned") is False
-    assert tw_readiness.get("required_action") is not None and "temporary works" in (tw_readiness.get("required_action") or "").lower(), (
-        "required_action must direct planner to add WBS/activity containing 'temporary works'"
+    ob_readiness = next((r for r in readiness if r.get("obligation_id") == tw_obligation_id), None)
+    assert ob_readiness is not None
+    assert ob_readiness.get("required_now") is True
+    assert ob_readiness.get("aligned") is False
+    assert ob_readiness.get("required_action") is not None and "utilities diversions" in (ob_readiness.get("required_action") or "").lower(), (
+        "required_action must direct planner to add WBS/activity containing the obligation text"
     )
 
     # Top-level authoritative fields present
@@ -163,8 +171,8 @@ def test_validate_programme_api_scenario_b_acceptable(
     contract_with_tw: dict,
 ):
     """
-    Scenario B: Same contract with mandatory Temporary Works.
-    Programme DOES include WBS or activity containing 'temporary works'.
+    Scenario B: Same contract with a mandatory WBS_ONLY obligation.
+    Programme DOES include WBS or activity containing the obligation text.
 
     Assert:
     - acceptability_status == ACCEPTABLE
@@ -176,7 +184,7 @@ def test_validate_programme_api_scenario_b_acceptable(
     response = client.post(
         "/api/v1/validate_programme",
         files={
-            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_OBLIGATION), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
         },
         data={"submission_stage_form": "initial"},
@@ -193,12 +201,12 @@ def test_validate_programme_api_scenario_b_acceptable(
 
     # Advisory fields must not contradict
     if body.get("obligation_readiness"):
-        tw_readiness = next(
-            (r for r in body["obligation_readiness"] if "temporary" in (r.get("obligation_name") or "").lower()),
+        ob_readiness = next(
+            (r for r in body["obligation_readiness"] if "utilities" in (r.get("obligation_name") or "").lower()),
             None,
         )
-        if tw_readiness:
-            assert tw_readiness.get("aligned") is True
+        if ob_readiness:
+            assert ob_readiness.get("aligned") is True
 
 
 # --- Step 5A API hardening tests ---
@@ -210,10 +218,10 @@ def test_idempotency_same_key_same_payload_returns_identical_response(
 ):
     """Same Idempotency-Key + same request payload returns identical previous response without re-running validation."""
     json_bytes = json.dumps(contract_with_tw).encode("utf-8")
-    key = "test-idem-same-payload"
+    key = f"test-idem-same-payload-{uuid.uuid4().hex}"
     headers = {"Idempotency-Key": key}
     files1 = {
-        "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+        "xer_file": ("programme.xer", BytesIO(XER_WITH_OBLIGATION), "application/octet-stream"),
         "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
     }
     data1 = {"submission_stage_form": "initial"}
@@ -222,7 +230,7 @@ def test_idempotency_same_key_same_payload_returns_identical_response(
     body1 = r1.json()
     # Second request: same key, same payload (fresh BytesIO)
     files2 = {
-        "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+        "xer_file": ("programme.xer", BytesIO(XER_WITH_OBLIGATION), "application/octet-stream"),
         "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
     }
     r2 = client.post("/api/v1/validate_programme", files=files2, data=data1, headers=headers)
@@ -237,13 +245,13 @@ def test_idempotency_same_key_different_payload_returns_409(
 ):
     """Same Idempotency-Key with different request payload returns HTTP 409 and structured error."""
     json_bytes = json.dumps(contract_with_tw).encode("utf-8")
-    key = "test-idem-different-payload"
+    key = f"test-idem-different-payload-{uuid.uuid4().hex}"
     headers = {"Idempotency-Key": key}
     # First request
     r1 = client.post(
         "/api/v1/validate_programme",
         files={
-            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_OBLIGATION), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
         },
         data={"submission_stage_form": "initial"},
@@ -254,7 +262,7 @@ def test_idempotency_same_key_different_payload_returns_409(
     r2 = client.post(
         "/api/v1/validate_programme",
         files={
-            "xer_file": ("programme.xer", BytesIO(XER_NO_TEMPORARY_WORKS), "application/octet-stream"),
+            "xer_file": ("programme.xer", BytesIO(XER_NO_OBLIGATION), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
         },
         data={"submission_stage_form": "initial"},
@@ -294,7 +302,7 @@ def test_response_signature_present_and_deterministic(
     r1 = client.post(
         "/api/v1/validate_programme",
         files={
-            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_OBLIGATION), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
         },
         data={"submission_stage_form": "initial"},
@@ -308,7 +316,7 @@ def test_response_signature_present_and_deterministic(
     r2 = client.post(
         "/api/v1/validate_programme",
         files={
-            "xer_file": ("programme.xer", BytesIO(XER_WITH_TEMPORARY_WORKS), "application/octet-stream"),
+            "xer_file": ("programme.xer", BytesIO(XER_WITH_OBLIGATION), "application/octet-stream"),
             "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
         },
         data={"submission_stage_form": "initial"},

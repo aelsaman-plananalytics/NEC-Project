@@ -6,6 +6,7 @@ Submission comparison is observational only; does not affect acceptability, pers
 
 import json
 import pytest
+import uuid
 from io import BytesIO
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,7 +17,7 @@ from app.p6_engine.frozen_requirements import build_frozen_requirements
 _app = FastAPI()
 _app.include_router(validate_programme_router.router)
 
-# Minimal XER: one WBS "Design", one task. No Temporary Works.
+# Minimal XER: one WBS "Design", one task. No obligation.
 XER_NO_TW = b"""%T\tPROJWBS
 %F\twbs_id\tparent_wbs_id\twbs_name
 %R\t1\t\tDesign
@@ -28,24 +29,31 @@ XER_NO_TW = b"""%T\tPROJWBS
 %E\tTASK
 """
 
-# Minimal XER: Design + Temporary Works.
+# Minimal XER: Design + Utilities Diversions.
 XER_WITH_TW = b"""%T\tPROJWBS
 %F\twbs_id\tparent_wbs_id\twbs_name
 %R\t1\t\tDesign
-%R\t2\t\tTemporary Works
+%R\t2\t\tUtilities Diversions
 %E\tPROJWBS
 
 %T\tTASK
 %F\ttask_id\ttask_name\twbs_id
 %R\t1\tDesign\t1
-%R\t2\tTW activity\t2
+%R\t2\tDiversions activity\t2
 %E\tTASK
 """
 
 
 def _contract_json():
     contract_data = {
-        "scope_items": [],
+        "scope_items": [
+            {
+                "text": "Utilities Diversions",
+                "mandatory_for_acceptance": True,
+                "evidence_mode": "WBS_ONLY",
+                "canonical_match_string": "utilities diversions",
+            }
+        ],
         "programme_compliance_model": {},
         "constraints": [],
     }
@@ -117,7 +125,7 @@ def test_idempotency_same_key_different_previous_xer_returns_409(
 ):
     """Same Idempotency-Key + different previous_xer_file → 409 conflict."""
     json_bytes = json.dumps(contract_json).encode("utf-8")
-    key = "test-idem-different-previous"
+    key = f"test-idem-different-previous-{uuid.uuid4().hex}"
     headers = {"Idempotency-Key": key}
     # First request: current + previous
     r1 = client.post(
