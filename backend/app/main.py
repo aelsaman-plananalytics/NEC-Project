@@ -164,21 +164,8 @@ app.include_router(full_review.router)
 
 
 @app.get("/", include_in_schema=False)
-async def index(request: Request):
-    """
-    Root endpoint.
-
-    - API clients (e.g. Render health checks) get JSON.
-    - Browsers get the existing HTML landing page.
-    """
-    accept = (request.headers.get("accept") or "").lower()
-    if "application/json" in accept or "*/*" in accept:
-        return {
-            "status": "ok",
-            "service": "NEC Engineering Analysis System",
-            "message": "API is running",
-        }
-    return templates.TemplateResponse("index.html", {"request": request})
+def root():
+    return {"status": "ok"}
 
 
 @app.get("/favicon.ico", include_in_schema=False)
