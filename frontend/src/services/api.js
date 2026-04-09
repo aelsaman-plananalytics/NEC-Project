@@ -3,7 +3,7 @@
  * All backend calls go through here. User-facing error messages only.
  */
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000';
+const API_BASE = (process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 
 const AUTH_TOKEN_KEY = 'nec_analysis_token';
 
