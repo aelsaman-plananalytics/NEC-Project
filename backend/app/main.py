@@ -104,14 +104,15 @@ app = FastAPI(
 )
 
 # CORS middleware configuration
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://plananalytics-gapcheck.co.uk",
+    "https://www.plananalytics-gapcheck.co.uk",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],  # Explicitly allow frontend origins
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -282,10 +283,4 @@ async def get_ai_mode():
         }
     }
 
-
-@app.options("/api/{path:path}", include_in_schema=False)
-async def options_handler(path: str):
-    """Handle CORS preflight requests."""
-    from fastapi.responses import Response
-    return Response(status_code=200)
 

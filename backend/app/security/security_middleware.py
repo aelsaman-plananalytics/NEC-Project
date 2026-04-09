@@ -43,6 +43,10 @@ class SecurityMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         if not _is_api_route(request):
             return await call_next(request)
+        # Allow CORS preflight to pass through without auth/rate-limit gates.
+        # CORSMiddleware will generate the correct preflight response.
+        if (request.method or "").upper() == "OPTIONS":
+            return await call_next(request)
 
         # 1. Request size limit (Content-Length)
         content_length = request.headers.get("content-length")
