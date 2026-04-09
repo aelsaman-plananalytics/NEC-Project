@@ -1976,8 +1976,45 @@ class ComprehensiveValidator:
                 "failure_reason": entity_validation_error,
             }
         obligations_list = entities.get("obligations") or []
-        # Intentional: zero mandatory obligations => pass. Not "empty list = success" for existing obligations.
+        # Guard: if we rebuilt obligation_entities but produced an empty list while the contract data
+        # contains potential obligation sources, treat as a construction/extraction failure (fail closed).
         if not obligations_list:
+            pcm = contract_data.get("programme_compliance_model") or {}
+            has_sources = any([
+                bool(contract_data.get("scope_items")),
+                bool(contract_data.get("constraints")),
+                bool(contract_data.get("programme_requirements")),
+                bool(contract_data.get("required_activities")),
+                bool(pcm.get("programme_duties") or pcm.get("required_activities")),
+                bool(pcm.get("sequencing_and_timing_constraints")),
+                bool(pcm.get("programme_governance_and_acceptance_rules")),
+                bool(pcm.get("completion_and_takeover_gates")),
+            ])
+            if has_sources:
+                return {
+                    "status": "fail",
+                    "obligation_entities_used": True,
+                    "frozen_used": True,
+                    "obligations_report": [],
+                    "programme_obligations": [],
+                    "scope_evidence_table": [],
+                    "constraints_control": [],
+                    "governance_requirements": [],
+                    "acceptability_failure_reasons": [
+                        "No obligations were constructed from the contract data. "
+                        "This indicates a contract extraction / obligation construction failure."
+                    ],
+                    "requirements": [],
+                    "total_count": 0,
+                    "matched_count": 0,
+                    "missing": [],
+                    "importance_tier": TIER_1_CRITICAL,
+                    "outcome": HARD_BREACH,
+                    "source_clause": "Contract obligations (deduplicated)",
+                    "source_type": "explicit",
+                    "validation_basis": "obligation_entities",
+                    "failure_reason": "obligation_construction_empty",
+                }
             return {
                 "status": "pass",
                 "obligation_entities_used": True,
