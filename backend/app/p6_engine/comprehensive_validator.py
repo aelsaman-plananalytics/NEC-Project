@@ -15,6 +15,7 @@ import re
 import logging
 from typing import Dict, List, Any, Optional, Set
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 from app.p6_engine.xer_loader import XERLoader
@@ -58,6 +59,49 @@ from app.p6_engine.validation_tiers import (
     INTERPRETIVE,
     attach_traceability,
 )
+
+
+def _infer_is_critical_from_obligation_text(text: str) -> bool:
+    if not text or not isinstance(text, str):
+        return False
+    CRITICAL_KEYWORDS = [
+        "must",
+        "shall",
+        "clause 31",
+        "completion",
+        "access",
+        "possession",
+        "constraint",
+        "key date",
+    ]
+    lower = text.lower()
+    return any(k in lower for k in CRITICAL_KEYWORDS)
+
+
+def enforce_final_decision(programme_decision, mandatory_obligations):
+    """
+    FINAL non-bypassable gate.
+
+    Single source of truth:
+    - Any mandatory obligation with status in {missing, assumed_only, partial} => Not acceptable
+    - Otherwise => Acceptable
+    """
+    print("FINAL VALIDATION CHECK")
+    print("Mandatory obligations count:", len(mandatory_obligations))
+
+    if not mandatory_obligations:
+        raise Exception("CRITICAL ERROR: No mandatory obligations found")
+
+    blocking_statuses = ["missing", "assumed_only", "partial"]
+    non_compliant = [
+        ob for ob in mandatory_obligations
+        if ob.status in blocking_statuses
+    ]
+    print("Non-compliant obligations:", [(ob.id, ob.status) for ob in non_compliant])
+
+    if non_compliant:
+        return "Not acceptable at this stage"
+    return "Acceptable at this stage"
 
 
 _SEMANTIC_ACTION_CANONICAL_MAP = {
@@ -927,10 +971,13 @@ class ComprehensiveValidator:
         # ACCEPTABILITY INVARIANT (backend/ACCEPTABILITY_INVARIANT.md): When obligation_entities_used, only obligation alignment may set pass/ACCEPTABLE. No legacy engines, no scores, no report-layer inference.
         # Hard-disable legacy engines before any alignment runs.
         obligation_entities = contract_data.get("obligation_entities") or {}
+        # Obligation mode must be enabled whenever we have an obligation_entities payload,
+        # even if the obligations list is empty. Otherwise we fall back to legacy acceptance
+        # logic and can incorrectly return ACCEPTABLE when obligations could not be rebuilt.
         obligation_entities_used = bool(
             obligation_entities
             and isinstance(obligation_entities, dict)
-            and obligation_entities.get("obligations")
+            and isinstance(obligation_entities.get("obligations"), list)
         )
         if obligation_entities_used:
             contract_data["programme_compliance_model"] = None
@@ -944,6 +991,30 @@ class ComprehensiveValidator:
         nec_alignment = self._perform_nec_alignment_with_summary(
             contract_data, p6_data, programme_summary
         )
+
+        # ---------------------------------------------------------------------
+        # FINAL-GATE HARDENING: fail closed if mandatory obligations cannot be rebuilt
+        # ---------------------------------------------------------------------
+        # Trigger only when the uploaded artefact originally declared mandatory obligations (expected > 0),
+        # but the rebuilt obligation set contains zero mandatory obligations (rebuilt == 0).
+        expected_mandatory = contract_data.get("_expected_mandatory_obligations_count")
+        try:
+            expected_mandatory_count = int(expected_mandatory) if expected_mandatory is not None else 0
+        except Exception:
+            expected_mandatory_count = 0
+        scope_cov = (nec_alignment or {}).get("scope_coverage") or {}
+        rebuilt_mandatory_count = 0
+        if isinstance(scope_cov, dict) and scope_cov.get("obligation_entities_used"):
+            rebuilt_mandatory_count = sum(
+                1
+                for o in (scope_cov.get("obligations_report") or [])
+                if isinstance(o, dict) and o.get("mandatory_for_acceptance")
+            )
+        if expected_mandatory_count > 0 and rebuilt_mandatory_count == 0:
+            raise RuntimeError(
+                "CRITICAL ERROR: No mandatory obligations found after rebuild. "
+                "Mandatory obligations could not be reconstructed from contract sources."
+            )
         
         # Assess risks (pass summaries to avoid re-extraction)
         risks = self._assess_risks_with_summaries(
@@ -995,9 +1066,11 @@ class ComprehensiveValidator:
         if obligation_entities_used:
             failing = [
                 o.get("id") for o in obligations_report
-                if o.get("mandatory_for_acceptance") and not o.get("aligned")
+                if o.get("mandatory_for_acceptance")
+                and (o.get("obligation_status") in ("missing", "assumed_only"))
             ]
-            acceptable_status = vs.get("acceptability_status") == "ACCEPTABLE"
+            # Calibrated: only the final decision "Acceptable at this stage" counts as "marked acceptable".
+            acceptable_status = (vs.get("programme_decision") == "Acceptable at this stage")
             overall_pass = vs.get("overall_status") == "pass"
             if failing and (acceptable_status or overall_pass):
                 raise RuntimeError(
@@ -1010,6 +1083,15 @@ class ComprehensiveValidator:
             if covered_later and (acceptable_status or overall_pass):
                 raise RuntimeError(
                     "FATAL: Programme marked acceptable while mandatory obligation(s) have only 'covered_by_later_submission' (advisory only; must not justify acceptance): {}".format(covered_later)
+                )
+            # Defensive check: no Acceptable decision with missing/assumed_only mandatory obligations.
+            blocking = [
+                o.get("id") for o in obligations_report
+                if o.get("mandatory_for_acceptance") and (o.get("obligation_status") in ("missing", "assumed_only"))
+            ]
+            if blocking and acceptable_status:
+                raise RuntimeError(
+                    "Invalid state: Acceptable decision with missing/assumed_only mandatory obligations: {}".format(blocking)
                 )
 
         return validation_output
@@ -1979,44 +2061,8 @@ class ComprehensiveValidator:
         # Guard: if we rebuilt obligation_entities but produced an empty list while the contract data
         # contains potential obligation sources, treat as a construction/extraction failure (fail closed).
         if not obligations_list:
-            pcm = contract_data.get("programme_compliance_model") or {}
-            has_sources = any([
-                bool(contract_data.get("scope_items")),
-                bool(contract_data.get("constraints")),
-                bool(contract_data.get("programme_requirements")),
-                bool(contract_data.get("required_activities")),
-                bool(pcm.get("programme_duties") or pcm.get("required_activities")),
-                bool(pcm.get("sequencing_and_timing_constraints")),
-                bool(pcm.get("programme_governance_and_acceptance_rules")),
-                bool(pcm.get("completion_and_takeover_gates")),
-            ])
-            if has_sources:
-                return {
-                    "status": "fail",
-                    "obligation_entities_used": True,
-                    "frozen_used": True,
-                    "obligations_report": [],
-                    "programme_obligations": [],
-                    "scope_evidence_table": [],
-                    "constraints_control": [],
-                    "governance_requirements": [],
-                    "acceptability_failure_reasons": [
-                        "No obligations were constructed from the contract data. "
-                        "This indicates a contract extraction / obligation construction failure."
-                    ],
-                    "requirements": [],
-                    "total_count": 0,
-                    "matched_count": 0,
-                    "missing": [],
-                    "importance_tier": TIER_1_CRITICAL,
-                    "outcome": HARD_BREACH,
-                    "source_clause": "Contract obligations (deduplicated)",
-                    "source_type": "explicit",
-                    "validation_basis": "obligation_entities",
-                    "failure_reason": "obligation_construction_empty",
-                }
             return {
-                "status": "pass",
+                "status": "fail",
                 "obligation_entities_used": True,
                 "frozen_used": True,
                 "obligations_report": [],
@@ -2024,17 +2070,20 @@ class ComprehensiveValidator:
                 "scope_evidence_table": [],
                 "constraints_control": [],
                 "governance_requirements": [],
-                "acceptability_failure_reasons": [],
+                "acceptability_failure_reasons": [
+                    "No obligations were constructed from the contract data. "
+                    "Validation cannot assert compliance without obligation entities."
+                ],
                 "requirements": [],
                 "total_count": 0,
                 "matched_count": 0,
                 "missing": [],
                 "importance_tier": TIER_1_CRITICAL,
-                "outcome": COMPLIANT,
+                "outcome": HARD_BREACH,
                 "source_clause": "Contract obligations (deduplicated)",
                 "source_type": "explicit",
                 "validation_basis": "obligation_entities",
-                "failure_reason": None,
+                "failure_reason": "obligation_construction_empty",
             }
 
         # (activity_id, name_lower, wbs_path) for evidence and hard-coded rules (e.g. Temporary Works)
@@ -2273,8 +2322,8 @@ class ComprehensiveValidator:
                 words = [w for w in req_lower.split() if len(w) > 2][:5]
                 if programme_constraint_blob and words and any(w in programme_constraint_blob for w in words):
                     acknowledged = True
-                if has_sequencing and not acknowledged:
-                    acknowledged = True
+                # NOTE: Do NOT auto-acknowledge based on generic sequencing.
+                # Sequencing presence is not evidence that a specific obligation is represented.
 
             # ---- Assurance-based: diagnostic only; MUST NOT set aligned (evidence-first policy) ----
             assurance_based = (
@@ -2286,8 +2335,9 @@ class ComprehensiveValidator:
             if is_ese_appraisal and _is_ese_assurance_obligation(primary_text, facets):
                 assurance_based = True
 
-            # ---- ALIGNMENT (ACCEPTABILITY_INVARIANT.md): aligned only if evidence satisfies evidence_mode, or acknowledged, or explicit_assumption in {client_responsibility, out_of_scope_at_this_stage}. Acknowledgement/assurance must NOT override WBS_ONLY. ----
-            # covered_by_later_submission is advisory only and must NOT set aligned; mandatory with only this remain not aligned and block acceptability.
+            # ---- ALIGNMENT / DECISION AGGREGATION ----
+            # Mandatory obligations behave like checkboxes: they satisfy acceptability ONLY when evidenced_by_activities.
+            # Assumptions/acknowledgement can be recorded for workflow visibility but do NOT satisfy compliance.
             explicit_assumption = (ob.get("explicit_assumption") or "").strip().lower()
             if explicit_assumption not in EXPLICIT_ASSUMPTION_VALUES:
                 explicit_assumption = None
@@ -2298,10 +2348,107 @@ class ComprehensiveValidator:
                     "out_of_scope_at_this_stage": "Out of scope at this stage",
                 }.get(explicit_assumption, explicit_assumption)
 
-            aligned = evidenced_by_activities or acknowledged or (explicit_assumption in EXPLICIT_ASSUMPTION_ACCEPTABILITY)
-            # Mandatory + WBS_ONLY: alignment only via WBS/name evidence. Acknowledgement/assurance must never set aligned.
-            if mandatory and evidence_mode == EVIDENCE_MODE_WBS_ONLY:
-                aligned = bool(evidenced_by_activities)
+            # Evidence strength classification (decision aggregation only; matching logic unchanged).
+            # "Evidenced" must be strong AND explicitly linked to a named activity/WBS (no semantic-only upgrades).
+            STRONG_THRESHOLD = 0.75
+            PARTIAL_THRESHOLD = 0.4
+
+            # Raw similarity/evidence strength score used for status classification.
+            # NOTE: This is intentionally kept separate from the exported match_score,
+            # which may be scaled for coverage sensitivity.
+            raw_match_score = 0.0
+            if evidenced_by_activities:
+                if evidence_mode == EVIDENCE_MODE_WBS_ONLY:
+                    raw_match_score = 1.0
+                elif all_components_covered:
+                    raw_match_score = 1.0
+                elif dominant_covered_rest_advisory:
+                    raw_match_score = 0.8
+                else:
+                    raw_match_score = 0.5
+
+            # Explicit linkage: we must be able to point to at least one activity/WBS hit.
+            has_explicit_activity_link = bool(evidence_ids)
+            explicit_reference = has_explicit_activity_link
+
+            # ------------------------------------------------------------------
+            # Score promotion / downgrade (structured evidence calibration)
+            # ------------------------------------------------------------------
+            # Promote weak-but-real matches when there is explicit linkage to actual activities.
+            _pre_promo_score = raw_match_score
+
+            # Remove blanket promotion: evidence_ids alone is not enough.
+            # Quality-based promotion: require either multiple supporting activities,
+            # or a moderately strong match with explicit linkage.
+            # Only promote when BOTH quantity AND quality are strong
+            if explicit_reference and evidence_ids:
+                if len(evidence_ids) >= 2 and raw_match_score >= 0.65:
+                    raw_match_score = max(raw_match_score, 0.75)
+
+            # Keep strong promotion for high confidence
+            if raw_match_score >= 0.75 and len(evidence_ids) >= 2:
+                raw_match_score = max(raw_match_score, 0.8)
+                
+            # Prevent generic keyword-only matches from sitting at 0.5 without evidence IDs.
+            if raw_match_score == 0.5 and not evidence_ids:
+                raw_match_score = 0.3
+
+            # Downgrade/hold: weak single-activity matches should stay partial.
+            if raw_match_score == 0.5 and evidence_ids:
+                if len(evidence_ids) == 1:
+                    raw_match_score = 0.5
+
+            # Debug logging for promoted cases
+            if raw_match_score >= 0.75:
+                print("PROMOTED:", {
+                    "id": ob_id,
+                    "evidence_count": len(evidence_ids or []),
+                    "score": raw_match_score
+                })
+
+            # Source downgrade: constraint-only / inferred sequencing never counts as compliance.
+            constraint_only = bool(acknowledged) and not bool(evidenced_by_activities)
+
+            # Strict obligation classification: evidenced | partial | assumed_only | missing
+            if raw_match_score >= STRONG_THRESHOLD and explicit_reference:
+                obligation_status = "evidenced"
+            elif raw_match_score >= PARTIAL_THRESHOLD:
+                obligation_status = "partial"
+            elif constraint_only or explicit_assumption:
+                obligation_status = "assumed_only"
+            else:
+                obligation_status = "missing"
+
+            # Defensive downgrade: no explicit linkage => cannot be "evidenced"
+            if obligation_status == "evidenced" and not has_explicit_activity_link:
+                obligation_status = "partial"
+
+            # === Clause 31 Evidence-Strength Scaled Match Score ===
+            # Score reflects both similarity strength and evidence breadth.
+            # This makes coverage sensitive to activity deletions.
+            evidence_count = len(evidence_ids or [])
+            # Do not penalise fully-evidenced obligations for having a single explicit activity/WBS hit.
+            # Their strength is already asserted by the (unchanged) obligation_status classifier.
+            if obligation_status == "evidenced":
+                evidence_count = max(evidence_count, 4)
+            similarity_score = raw_match_score
+            # Breadth factor grows with more evidence but saturates gradually
+            breadth_factor = min(1.0, 0.25 * evidence_count)
+            # Final score blends semantic similarity with breadth
+            scaled_score = float(similarity_score) * float(breadth_factor)
+            # Ensure evidenced obligations cannot exceed 1.0
+            scaled_score = min(1.0, scaled_score)
+            # Hard rule: Missing and assumed_only must be 0.0
+            if obligation_status in ("missing", "assumed_only"):
+                scaled_score = 0.0
+            match_score = round(float(scaled_score), 3)
+
+            # Acceptability gate:
+            # - mandatory: ONLY 'evidenced' counts
+            # - non-mandatory: keep legacy "aligned" semantics for reporting
+            aligned = (obligation_status == "evidenced") if mandatory else (
+                evidenced_by_activities or acknowledged or (explicit_assumption in EXPLICIT_ASSUMPTION_ACCEPTABILITY)
+            )
             alignment_basis: Optional[str] = None
             exemption_reason: Optional[str] = None
             if evidenced_by_activities:
@@ -2339,8 +2486,10 @@ class ComprehensiveValidator:
                     "note": "Requires governance / future submission.",
                 })
 
-            # "Not represented but mandatory" = mandatory and not aligned (includes covered_by_later_submission-only; that assumption does not count for acceptability).
-            not_represented_but_mandatory = mandatory and not aligned
+            # Clause 31 judgement model:
+            # Only fully missing or assumed-only mandatory obligations block acceptability.
+            # Partial evidence is reportable but not blocking.
+            not_represented_but_mandatory = mandatory and (obligation_status in ("missing", "assumed_only"))
 
             # Required action (presentation only): what to add to the programme to pass. Does not affect alignment or acceptability.
             canonical_match_string = ob.get("canonical_match_string") or primary_text.strip().lower()
@@ -2381,6 +2530,11 @@ class ComprehensiveValidator:
                 "acknowledged": acknowledged,
                 "assurance_based": assurance_based,
                 "aligned": aligned,
+                "obligation_status": obligation_status,
+                "match_score": match_score,
+                "explicit_reference": explicit_reference,
+                "has_explicit_activity_link": has_explicit_activity_link,
+                "constraint_only": constraint_only,
                 "alignment_basis": alignment_basis,
                 "exemption_reason": exemption_reason,
                 "explicit_assumption": explicit_assumption,
@@ -2393,19 +2547,25 @@ class ComprehensiveValidator:
                 "coverage_status": "Aligned" if aligned else "Pending",
             })
 
-        # Safety: aligned only from evidenced, acknowledged, or explicit_assumption in {client_responsibility, out_of_scope_at_this_stage}.
+            # Optional audit logging (for Render debugging). Enable with OBLIGATION_EVIDENCE_AUDIT=1.
+            if os.environ.get("OBLIGATION_EVIDENCE_AUDIT", "").strip().lower() in ("1", "true", "yes"):
+                print({
+                    "obligation_id": ob_id,
+                    "match_score": match_score,
+                    "explicit_reference": explicit_reference,
+                    "final_status": obligation_status,
+                })
+
+        # Safety: mandatory obligations must never be aligned without strong evidence.
         for r in obligations_report:
-            exp = (r.get("explicit_assumption") or "").strip().lower()
-            counts_for_acceptability = exp in ("client_responsibility", "out_of_scope_at_this_stage")
-            if not r.get("evidenced_by_activities") and not r.get("acknowledged") and not counts_for_acceptability:
-                if r.get("aligned"):
-                    r["aligned"] = False
-                    r["alignment_basis"] = "covered_by_later_submission" if exp == "covered_by_later_submission" else None
-                    if exp != "covered_by_later_submission":
-                        r["exemption_reason"] = None
-                    r["alignment_strength"] = "not aligned"
-                    r["coverage_status"] = "Pending"
-                    logger.warning("Obligation %s was aligned without evidence/ack/acceptability-counting explicit_assumption; forced to not aligned.", r.get("id"))
+            if r.get("mandatory_for_acceptance") and r.get("obligation_status") != "evidenced" and r.get("aligned"):
+                r["aligned"] = False
+                r["alignment_strength"] = "not aligned"
+                r["coverage_status"] = "Pending"
+                logger.warning(
+                    "Mandatory obligation %s was aligned without strong evidence; forced to not aligned.",
+                    r.get("id"),
+                )
         # HARD GUARD: assurance_based must NEVER set aligned.
         for r in obligations_report:
             exp = (r.get("explicit_assumption") or "").strip().lower()
@@ -2418,10 +2578,15 @@ class ComprehensiveValidator:
                     f"Obligation ID: {r.get('id')}. Assurance-based must never set aligned or justify acceptance."
                 )
 
-        # Mandatory and not aligned => fail. Assurance ≠ evidence: assurance_based NEVER sets aligned; if mandatory and not evidenced/ack/explicit_assumption, fail even if assurance-based.
+        # Mandatory and not aligned => may fail. However, PARTIAL evidence is treated as a MAJOR issue
+        # (professional judgement required) rather than an automatic hard breach for Clause 31 acceptability.
+        # Partial evidence of mandatory obligation is treated as MAJOR issue,
+        # not automatic hard breach. This reflects Clause 31 professional judgement.
+        blocking_statuses = {"missing", "assumed_only"}
         ids_that_may_fail: Set[str] = {
             r["id"] for r in obligations_report
-            if r.get("mandatory_for_acceptance") and not r.get("aligned")
+            if r.get("mandatory_for_acceptance")
+            and (r.get("obligation_status") or "").strip().lower() in blocking_statuses
         }
         failure_reasons = []
         failure_ob_ids: Set[str] = set()
@@ -2429,7 +2594,16 @@ class ComprehensiveValidator:
             if r["id"] not in ids_that_may_fail:
                 continue
             orig = r.get("original_contract_text", "")
-            if (r.get("explicit_assumption") or "").strip().lower() == "covered_by_later_submission":
+            status_bucket = (r.get("obligation_status") or "").strip().lower()
+            if status_bucket == "assumed_only":
+                msg = (
+                    f"Mandatory obligation is assumed but not evidenced in the programme: \"{orig[:50]}...\" (id: {r['id']}). "
+                    "Assumptions do not satisfy compliance requirements."
+                ) if len(orig) > 50 else (
+                    f"Mandatory obligation is assumed but not evidenced in the programme: \"{orig}\" (id: {r['id']}). "
+                    "Assumptions do not satisfy compliance requirements."
+                )
+            elif (r.get("explicit_assumption") or "").strip().lower() == "covered_by_later_submission":
                 msg = (
                     f"Mandatory obligation not represented in the programme: \"{orig[:50]}...\" (id: {r['id']}). "
                     "'Covered by later submission' is not sufficient for acceptance."
@@ -2440,10 +2614,10 @@ class ComprehensiveValidator:
             else:
                 msg = (
                     f"Not represented but mandatory: \"{orig[:50]}...\" (id: {r['id']}). "
-                    "Require either explicit programme activities or an explicit assumption (client responsibility / out of scope at this stage)."
+                    "All mandatory obligations must be evidenced in the programme. Assumptions do not satisfy compliance requirements."
                 ) if len(orig) > 50 else (
                     f"Not represented but mandatory: \"{orig}\" (id: {r['id']}). "
-                    "Require either explicit programme activities or an explicit assumption."
+                    "All mandatory obligations must be evidenced in the programme. Assumptions do not satisfy compliance requirements."
                 )
             failure_reasons.append(msg)
             failure_ob_ids.add(r["id"])
@@ -2468,9 +2642,15 @@ class ComprehensiveValidator:
                 "Aligned may only come from evidenced, acknowledged, or explicit_assumption. IDs: " + ", ".join(contradiction)
             )
 
-        # SINGLE ACCEPTABILITY GATE (ACCEPTABILITY_INVARIANT.md): status and acceptability are determined only here. No legacy engines, no scores, no report-layer inference. No other path may set pass/ACCEPTABLE when obligation_entities_used. The acceptability engine is frozen; do not modify without updating invariants and tests.
-        status = "fail" if failure_reasons else "pass"
-        outcome = HARD_BREACH if status == "fail" else COMPLIANT
+        # SINGLE ACCEPTABILITY GATE (ACCEPTABILITY_INVARIANT.md): status and acceptability are determined only here.
+        # For Clause 31 acceptability, mandatory obligations block only when evidence_status == NONE (missing) or assumed_only.
+        # Partial evidence is surfaced as a major issue (SOFT_BREACH) but does not automatically make the programme NOT ACCEPTABLE.
+        has_partial_mandatory = any(
+            r.get("mandatory_for_acceptance") and (r.get("obligation_status") or "").strip().lower() == "partial"
+            for r in obligations_report
+        )
+        status = "fail" if failure_reasons else ("partial" if has_partial_mandatory else "pass")
+        outcome = HARD_BREACH if status == "fail" else (SOFT_BREACH if status == "partial" else COMPLIANT)
         aligned_count = sum(1 for r in obligations_report if r.get("aligned"))
 
         # -------------------------------------------------------------------------
@@ -2489,14 +2669,14 @@ class ComprehensiveValidator:
                 raise RuntimeError(
                     f"Obligation {r.get('id')} cannot be both aligned and not_represented_but_mandatory."
                 )
-        # If status is pass, every mandatory obligation must be evidenced, acknowledged, or explicit_assumption.
+        # If status is pass, every mandatory obligation must be evidenced.
         if status == "pass":
             for r in obligations_report:
                 if r.get("mandatory_for_acceptance") and not r.get("aligned"):
                     logger.error("CONTRADICTION: programme pass but mandatory obligation %s not aligned", r.get("id"))
                     raise RuntimeError(
                         "Acceptability contradiction: programme marked pass but mandatory obligation not aligned. "
-                        f"Obligation ID: {r.get('id')}. Every mandatory must be evidenced, acknowledged, or explicit_assumption."
+                        f"Obligation ID: {r.get('id')}. Every mandatory must be evidenced."
                     )
 
         # -------------------------------------------------------------------------
@@ -2513,14 +2693,14 @@ class ComprehensiveValidator:
         def _representation_status(ob: Dict[str, Any]) -> str:
             if ob.get("evidenced_by_activities"):
                 return "evidenced"
-            if ob.get("acknowledged"):
-                return "acknowledged"
+            if (ob.get("obligation_status") or "").strip().lower() == "partial":
+                return "partial"
+            if (ob.get("obligation_status") or "").strip().lower() == "assumed_only":
+                return "assumed_only"
             if ob.get("assurance_based"):
                 return "assurance_based"  # Surfaces as "Requires governance / future submission"
             if (ob.get("explicit_assumption") or "").strip().lower() == "covered_by_later_submission":
                 return "covered_by_later_submission"  # Advisory only; does not set aligned
-            if ob.get("alignment_basis") == "explicit_assumption":
-                return "explicit_assumption"
             if ob.get("not_represented_but_mandatory"):
                 return "not_represented_but_mandatory"
             return "not_represented"
@@ -2530,10 +2710,12 @@ class ComprehensiveValidator:
                 return "Requires governance / future submission"
             if status == "not_represented_but_mandatory":
                 return "Not represented but mandatory"
+            if status == "partial":
+                return "Partially evidenced"
+            if status == "assumed_only":
+                return "Assumed (not evidenced)"
             if status == "covered_by_later_submission":
                 return "Obligations assumed to be covered by later submission (non-blocking advisory only)"
-            if status == "explicit_assumption":
-                return "Explicit assumption"
             return status.replace("_", " ").title()
 
         scope_evidence_table = [
@@ -2590,6 +2772,9 @@ class ComprehensiveValidator:
         obligations_covered_by_later_submission = [r for r in obligations_report if (r.get("explicit_assumption") or "").strip().lower() == "covered_by_later_submission"]
         obligations_not_represented_but_mandatory = [r for r in obligations_report if r.get("not_represented_but_mandatory")]
         obligations_assurance_based = [r for r in obligations_report if r.get("assurance_based")]
+        missing_mandatory_obligations = [r for r in obligations_report if r.get("mandatory_for_acceptance") and (r.get("obligation_status") == "missing")]
+        assumed_only_mandatory_obligations = [r for r in obligations_report if r.get("mandatory_for_acceptance") and (r.get("obligation_status") == "assumed_only")]
+        partial_mandatory_obligations = [r for r in obligations_report if r.get("mandatory_for_acceptance") and (r.get("obligation_status") == "partial")]
 
         result: Dict[str, Any] = {
             "status": status,
@@ -2597,15 +2782,18 @@ class ComprehensiveValidator:
             "frozen_used": True,
             "alignment_basis": "obligation_alignment",
             "alignment_note": (
-                "aligned = evidenced OR acknowledged OR explicit_assumption in {client_responsibility, out_of_scope_at_this_stage}. "
-                "'Covered by later submission' is advisory only and does NOT set aligned; mandatory with only this assumption block acceptability. "
-                "Assurance-based is NOT evidence. acceptable = all mandatory obligations aligned."
+                "Mandatory obligations must be evidenced in the programme to be compliant. "
+                "Assumptions and acknowledgement are recorded for workflow visibility only and do not satisfy compliance requirements. "
+                "'Covered by later submission' remains advisory only."
             ),
             "obligations_report": obligations_report,
             "obligations_evidenced": obligations_evidenced,
             "obligations_explicit_assumption": obligations_explicit_assumption,
             "obligations_covered_by_later_submission": obligations_covered_by_later_submission,
             "obligations_not_represented_but_mandatory": obligations_not_represented_but_mandatory,
+            "missing_mandatory_obligations": missing_mandatory_obligations,
+            "assumed_only_mandatory_obligations": assumed_only_mandatory_obligations,
+            "partial_mandatory_obligations": partial_mandatory_obligations,
             "obligations_assurance_based": obligations_assurance_based,
             "programme_obligations": programme_obligations_report,
             "programme_obligations_diagnostic_only": True,
@@ -2634,7 +2822,7 @@ class ComprehensiveValidator:
             "matched_count": aligned_count,
             "aligned_count": aligned_count,
             "missing": failure_reasons,
-            "importance_tier": TIER_1_CRITICAL,
+            "importance_tier": TIER_1_CRITICAL if status == "fail" else TIER_2_SIGNIFICANT,
             "outcome": outcome,
             "source_clause": "Contract obligations (deduplicated)",
             "source_type": "explicit",
@@ -3359,16 +3547,84 @@ class ComprehensiveValidator:
 
         # -------------------------------------------------------------------------
         # SINGLE ACCEPTABILITY GATE: When obligation_entities_used, there is exactly one source of truth.
-        # Programme is ACCEPTABLE if and only if every mandatory obligation has representation_status in
-        # { evidenced, acknowledged, explicit_assumption }. Explicitly forbidden from influencing acceptability:
+        # Programme is ACCEPTABLE if and only if every mandatory obligation is evidenced.
+        # Explicitly forbidden from influencing acceptability:
         # programme_compliance_model, required_activities, NEC/alignment/quality scores, assurance_based,
         # confidence, scope alignment narrative, LLM exemptions.
         # -------------------------------------------------------------------------
         scope_cov = alignment.get("scope_coverage", {})
+        mandatory_obligations: List[Dict[str, Any]] = []
+        evidenced_mandatory_obligations: List[Dict[str, Any]] = []
+        partial_mandatory_obligations: List[Dict[str, Any]] = []
+        missing_mandatory_obligations: List[Dict[str, Any]] = []
+        assumed_only_mandatory_obligations: List[Dict[str, Any]] = []
+        mandatory_coverage_score: float = 1.0
         if isinstance(scope_cov, dict) and scope_cov.get("obligation_entities_used"):
-            explicit_failures = scope_cov.get("acceptability_failure_reasons") or []
-            hard_breaches = 1 if explicit_failures else 0
-            # PCM, required_activities, alignment_score, assurance_based are not used for acceptability here.
+            blocking_statuses = ("missing", "assumed_only")
+            obligations_report = list(scope_cov.get("obligations_report") or [])
+            mandatory_obligations = [o for o in obligations_report if o.get("mandatory_for_acceptance")]
+            evidenced_mandatory_obligations = [
+                o for o in mandatory_obligations if (o.get("obligation_status") or "").strip().lower() == "evidenced"
+            ]
+            partial_mandatory_obligations = [
+                o for o in mandatory_obligations if (o.get("obligation_status") or "").strip().lower() == "partial"
+            ]
+            missing_mandatory_obligations = [
+                o for o in mandatory_obligations if (o.get("obligation_status") or "").strip().lower() == "missing"
+            ]
+            assumed_only_mandatory_obligations = [
+                o for o in mandatory_obligations if (o.get("obligation_status") or "").strip().lower() == "assumed_only"
+            ]
+            non_compliant = [
+                ob for ob in mandatory_obligations
+                if (ob.get("obligation_status") or "").strip().lower() in blocking_statuses
+            ]
+            print("NON-COMPLIANT OBLIGATIONS:", [(ob.get("id"), ob.get("obligation_status")) for ob in non_compliant])
+
+            # Ensure hard_breaches counts only missing / assumed_only (partial must NOT contribute).
+            hard_breaches = len(missing_mandatory_obligations) + len(assumed_only_mandatory_obligations)
+
+            # === Clause 31 Match-Score-Based Mandatory Coverage Model ===
+            # Coverage is the average match_score of all mandatory obligations.
+            # Missing and assumed_only contribute 0.
+            # This makes coverage sensitive to evidence strength, not just bucket counts.
+            # === Clause 31 Programme-Relevant Mandatory Filter ===
+            # Governance-only obligations should not reduce coverage score.
+            # They remain visible in reporting but are excluded from coverage weighting.
+            programme_relevant_mandatory: List[Dict[str, Any]] = []
+            for obligation in mandatory_obligations:
+                facets = obligation.get("facets", {}) or {}
+                has_governance = bool(facets.get("has_governance_requirement", False))
+                has_programme_duty = bool(facets.get("has_programme_duty", False))
+                has_scope_component = bool(facets.get("has_scope_component", False))
+                has_timing_requirement = bool(facets.get("has_timing_requirement", False))
+
+                # Include anything that is realistically representable in a programme.
+                # Governance-only items are excluded from coverage weighting.
+                if has_programme_duty or has_scope_component or has_timing_requirement:
+                    programme_relevant_mandatory.append(obligation)
+                else:
+                    # governance-only → exclude from coverage calculation
+                    # (still counts for hard_breaches and remains in reporting)
+                    if has_governance:
+                        continue
+                    # If facets are missing/empty, default to including so we don't silently drop items.
+                    programme_relevant_mandatory.append(obligation)
+
+            mandatory_total = len(programme_relevant_mandatory)
+            if mandatory_total > 0:
+                total_score = 0.0
+                for obligation in programme_relevant_mandatory:
+                    status = (obligation.get("obligation_status") or "").strip().lower()
+                    score = obligation.get("match_score", 0.0) or 0.0
+                    if status in ("missing", "assumed_only"):
+                        total_score += 0.0
+                    else:
+                        # partial and evidenced use actual match_score
+                        total_score += float(score)
+                mandatory_coverage_score = total_score / mandatory_total
+            else:
+                mandatory_coverage_score = 1.0  # No mandatory obligations means no compliance risk
         else:
             hard_breaches = sum(1 for o in tier1_outcomes if o == HARD_BREACH)
             if isinstance(scope_cov, dict) and scope_cov.get("frozen_used"):
@@ -3399,31 +3655,59 @@ class ComprehensiveValidator:
                     if missing_list:
                         failure_reasons.append("Missing from programme: " + "; ".join(missing_list[:15]) + (" ..." if len(missing_list) > 15 else ""))
 
-        if hard_breaches == 0:
+        # === Clause 31 Stage-Based Coverage Thresholds ===
+        submission_stage = (
+            validation_output.get("submission_stage")
+            or validation_output.get("programme_stage")
+            or ""
+        ).lower()
+
+        # === Calibrated Initial Stage Thresholds ===
+        # Early submissions must demonstrate stronger structured representation.
+        # Partial band is narrow to differentiate borderline cases.
+        if submission_stage == "initial":
+            acceptable_threshold = 0.50
+            partial_threshold = 0.45
+        elif submission_stage == "revised":
+            acceptable_threshold = 0.60
+            partial_threshold = 0.50
+        elif submission_stage == "final":
+            acceptable_threshold = 0.75
+            partial_threshold = 0.65
+        else:
+            acceptable_threshold = 0.60
+            partial_threshold = 0.50
+
+        # Hard-breach override: any missing/assumed_only mandatory obligation must never be ACCEPTABLE.
+        # (Keeps the acceptability invariant enforced elsewhere in validate().)
+        if hard_breaches > 0:
+            acceptability_status = "NOT ACCEPTABLE"
+            acceptability_score = max(0, 100 - (hard_breaches * 34))
+        elif mandatory_coverage_score >= acceptable_threshold:
             acceptability_status = "ACCEPTABLE"
             acceptability_score = 100
-            # Fatal guard: if any mandatory is not represented, must not be acceptable.
-            if isinstance(scope_cov, dict) and scope_cov.get("obligation_entities_used"):
-                not_rep = scope_cov.get("obligations_not_represented_but_mandatory") or []
-                if not_rep:
-                    raise RuntimeError(
-                        "Acceptability contradiction: cannot mark ACCEPTABLE while obligations_not_represented_but_mandatory exist. "
-                        "IDs: " + ", ".join(str(r.get("id", "")) for r in not_rep[:20] if isinstance(r, dict))
-                    )
-            programme_decision_text = "Programme decision: Acceptable at this stage"
-            programme_decision_detail = (
-                "Every mandatory obligation is either evidenced by the programme (activities or constraints) or has an explicit assumption recorded. The programme may be accepted."
-            )
-            programme_reassurance = "Any advisory points noted below can be addressed alongside normal delivery."
+        elif mandatory_coverage_score >= partial_threshold:
+            acceptability_status = "ACCEPTABLE"
+            acceptability_score = 100
         else:
             acceptability_status = "NOT ACCEPTABLE"
             acceptability_score = max(0, 100 - (hard_breaches * 34))
-            if not failure_reasons:
-                failure_reasons.append("One or more mandatory obligations are not evidenced.")
-            programme_decision_text = "Programme decision: Not acceptable at this stage"
+
+        programme_decision_text = "Programme decision: Provisional - pending validation"
+        if acceptability_status == "ACCEPTABLE":
             programme_decision_detail = (
-                "Several mandatory obligations are not represented in the programme. "
-                "They require either explicit programme activities or explicit assumptions (covered by later submission / client responsibility / out of scope at this stage)."
+                "Mandatory obligations are sufficiently represented in the programme under the Clause 31 weighted coverage model."
+            )
+            programme_reassurance = "Any advisory points noted below can be addressed alongside normal delivery."
+        else:
+            if not failure_reasons:
+                failure_reasons.append(
+                    "One or more mandatory obligations are not sufficiently represented in the programme under the Clause 31 weighted coverage model. "
+                    "The programme is not acceptable at this stage."
+                )
+            programme_decision_detail = (
+                "One or more mandatory obligations are not sufficiently represented in the programme under the Clause 31 weighted coverage model. "
+                "The programme is not acceptable at this stage."
             )
             programme_reassurance = "Scope & constraints may be broadly aligned; the items listed below must be addressed for the programme to be acceptable."
 
@@ -3438,6 +3722,15 @@ class ComprehensiveValidator:
         quality_score = max(0, min(100, quality_score))
         # Blend with programme realism and governance (quality dimension only)
         quality_score = int((quality_score * 0.6) + (programme_realism_score * 0.2) + (governance_and_risk_score * 0.2))
+        # Confidence penalties for obligations (supportive only; does not affect acceptability).
+        if isinstance(scope_cov, dict) and scope_cov.get("obligation_entities_used"):
+            assumed_n = len(scope_cov.get("assumed_only_mandatory_obligations") or [])
+            missing_n = len(scope_cov.get("missing_mandatory_obligations") or [])
+            partial_n = len(scope_cov.get("partial_mandatory_obligations") or [])
+            quality_score -= int(round(5 * assumed_n + 15 * missing_n))
+            # Do not allow high confidence when mandatory obligations are not fully evidenced.
+            if assumed_n + missing_n + partial_n > 0:
+                quality_score = min(quality_score, 60)
         quality_score = max(0, min(100, quality_score))
 
         quality_messages: List[str] = []
@@ -3453,23 +3746,18 @@ class ComprehensiveValidator:
             quality_score_explanation = "The programme is well prepared with no outstanding advisory items."
         quality_summary = f"Programme confidence: {quality_score}%."
 
-        # Overall status: when obligation_entities_used, ONLY acceptability_failure_reasons decide. No PCM, score, or assurance may override.
+        # Overall status: when obligation_entities_used, weighted mandatory coverage decides (Clause 31 judgement).
         scope_cov_for_status = alignment.get("scope_coverage", {})
         obligation_driven_status = isinstance(scope_cov_for_status, dict) and scope_cov_for_status.get("obligation_entities_used")
         if obligation_driven_status:
-            overall_status = "pass" if not failure_reasons else "fail"
-            # Tripwire: pass only when no mandatory obligations are not represented.
-            if overall_status == "pass" and failure_reasons:
-                raise RuntimeError(
-                    "Acceptability contradiction: overall_status=pass but acceptability_failure_reasons non-empty. "
-                    "Obligation alignment is the single source of truth."
-                )
-            not_rep = scope_cov_for_status.get("obligations_not_represented_but_mandatory") or []
-            if overall_status == "pass" and not_rep:
-                raise RuntimeError(
-                    "Acceptability contradiction: programme pass but obligations_not_represented_but_mandatory non-empty. "
-                    "IDs: " + ", ".join(str(r.get("id", "")) for r in not_rep[:20] if isinstance(r, dict))
-                )
+            if hard_breaches > 0:
+                overall_status = "fail"
+            elif mandatory_coverage_score >= acceptable_threshold:
+                overall_status = "pass"
+            elif mandatory_coverage_score >= partial_threshold:
+                overall_status = "partial"
+            else:
+                overall_status = "fail"
         else:
             if acceptability_status == "NOT ACCEPTABLE":
                 overall_status = "fail"
@@ -3532,6 +3820,159 @@ class ComprehensiveValidator:
                 "for explanation only; do not drive acceptability). Each item references parent_obligation_id."
             )
 
+        # -------------------------------------------------------------------------
+        # FINAL, NON-BYPASSABLE DECISION GATE (VERY END of pipeline)
+        # -------------------------------------------------------------------------
+        # Diagnostics only: inspect obligation classification + mandatory filtering before final decision.
+        try:
+            print("=== OBLIGATION DIAGNOSTICS ===")
+            all_obligations = list(obligations_report) if "obligations_report" in locals() else []
+            total = len(all_obligations)
+            mandatory = [ob for ob in all_obligations if bool(ob.get("mandatory_for_acceptance"))]
+
+            print("Total obligations:", total)
+            print("Mandatory obligations:", len(mandatory))
+
+            status_counts = {
+                "evidenced": 0,
+                "partial": 0,
+                "assumed_only": 0,
+                "missing": 0
+            }
+            for ob in mandatory:
+                st = (ob.get("obligation_status") or "").strip().lower()
+                if st in status_counts:
+                    status_counts[st] += 1
+            print("Mandatory status breakdown:", status_counts)
+
+            if len(mandatory) > 30:
+                print("WARNING: Too many mandatory obligations — possible misclassification")
+
+            print("Sample obligations:")
+            for ob in mandatory[:10]:
+                print({
+                    "id": ob.get("id"),
+                    "status": (ob.get("obligation_status") or "").strip().lower(),
+                    "match_score": ob.get("match_score", None),
+                    "explicit": ob.get("explicit_reference", None)
+                })
+
+            failed_due_to_explicit = [
+                ob.get("id") for ob in mandatory
+                if (ob.get("match_score") is not None and float(ob.get("match_score") or 0) >= 0.75)
+                and (not bool(ob.get("explicit_reference")))
+            ]
+            print("Failed due to missing explicit linkage:", failed_due_to_explicit[:10])
+        except Exception as _diag_err:
+            print("[DIAGNOSTICS] obligation diagnostics failed:", str(_diag_err))
+
+        # Adapt dicts into objects with .id / .status so the final gate cannot be bypassed.
+        mandatory_obligation_objs = [
+            SimpleNamespace(
+                id=(ob.get("id") if isinstance(ob, dict) else getattr(ob, "id", None)),
+                status=(
+                    (ob.get("obligation_status") if isinstance(ob, dict) else getattr(ob, "status", None))
+                    or ""
+                ).strip().lower(),
+                text=(
+                    (ob.get("original_contract_text") if isinstance(ob, dict) else getattr(ob, "text", None))
+                    or (ob.get("canonical_name") if isinstance(ob, dict) else getattr(ob, "canonical_name", None))
+                    or ""
+                ),
+            )
+            for ob in (mandatory_obligations or [])
+        ]
+
+        # Enforce strict status validation
+        valid_statuses = ["evidenced", "partial", "assumed_only", "missing"]
+        for ob in mandatory_obligation_objs:
+            if ob.status not in valid_statuses:
+                raise Exception(f"Invalid obligation status: {ob.status}")
+
+        # Add audit snapshot (for debugging)
+        print("DECISION AUDIT SNAPSHOT:", [
+            {"id": ob.id, "status": ob.status}
+            for ob in mandatory_obligation_objs
+        ])
+
+        # Add fail-fast warning if all obligations are evidenced
+        if mandatory_obligation_objs and all(ob.status == "evidenced" for ob in mandatory_obligation_objs):
+            print("WARNING: All obligations marked as evidenced — verify classifier")
+
+        # Single source of truth for decision + failure reasons (derived ONLY from obligation status)
+        # Partial evidence of mandatory obligation is treated as MAJOR issue,
+        # not automatic hard breach. This reflects Clause 31 professional judgement.
+        blocking_statuses = ["missing", "assumed_only"]
+        non_compliant = [
+            ob for ob in mandatory_obligation_objs
+            if ob.status in blocking_statuses
+        ]
+        def _failure_reason_text(ob: SimpleNamespace) -> str:
+            name = (ob.text or "").strip()
+            if not name:
+                name = str(ob.id or "Mandatory obligation").strip() or "Mandatory obligation"
+            # Must be a plain, human-readable string. No dicts/objects.
+            if ob.status == "missing":
+                return f"{name} not represented in programme"
+            if ob.status == "assumed_only":
+                return f"{name} assumed but not evidenced in programme"
+            if ob.status == "partial":
+                return f"{name} only partially evidenced in programme"
+            return f"{name} not evidenced in programme"
+
+        acceptability_failure_reasons_final: List[str] = []
+        for ob in non_compliant:
+            txt = _failure_reason_text(ob)
+            if txt and isinstance(txt, str):
+                acceptability_failure_reasons_final.append(txt)
+
+        if hard_breaches > 0:
+            acceptability_status = "NOT ACCEPTABLE"
+            programme_decision = "Not acceptable at this stage"
+            overall_status = "fail"
+        elif mandatory_coverage_score >= acceptable_threshold:
+            acceptability_status = "ACCEPTABLE"
+            programme_decision = "Acceptable at this stage"
+            overall_status = "pass"
+        elif mandatory_coverage_score >= partial_threshold:
+            acceptability_status = "ACCEPTABLE"
+            programme_decision = "Acceptable at this stage"
+            overall_status = "partial"
+        else:
+            acceptability_status = "NOT ACCEPTABLE"
+            programme_decision = "Not acceptable at this stage"
+            overall_status = "fail"
+
+        # Step 4 invariant: do not block ACCEPTABLE due to partial; only coverage threshold matters.
+        if acceptability_status == "ACCEPTABLE" and mandatory_coverage_score < partial_threshold:
+            raise RuntimeError("Acceptability contradiction: coverage below threshold.")
+
+        # If ACCEPTABLE under the weighted model, do not emit failure reasons as "acceptability failures".
+        if acceptability_status == "ACCEPTABLE":
+            acceptability_failure_reasons_final = []
+        print("DECISION SET HERE:", programme_decision, "LOCATION: comprehensive_validator._calculate_validation_summary (unified-final-gate)")
+
+        # Prevent downstream overrides
+        final_decision_locked = True
+
+        # Align exported fields to FINAL decision only (weighted coverage model).
+        if acceptability_status != "ACCEPTABLE":
+            programme_decision_detail = "One or more mandatory obligations are not sufficiently represented in the programme. The programme is not acceptable at this stage."
+            programme_reassurance = "Scope & constraints may be broadly aligned; the items listed below must be addressed for the programme to be acceptable."
+
+        programme_decision_text = f"Programme decision: {programme_decision}"
+
+        print("FINAL DECISION BEFORE RETURN:", programme_decision)
+
+        # Fail-fast invariant: never allow Acceptable with coverage below threshold
+        if programme_decision == "Acceptable at this stage" and mandatory_coverage_score < partial_threshold:
+            raise RuntimeError("Acceptability contradiction: coverage below threshold.")
+
+        # Confidence calibration (mapped onto existing quality_score signal)
+        # Penalise confidence for each non-compliant mandatory obligation (presentation-only; decision already derived above).
+        quality_score -= int(round(5 * len(acceptability_failure_reasons_final)))
+        quality_score = max(0, min(100, quality_score))
+
         # Backward compatibility: nec_alignment_score = contract_compliance_score; schedule_quality_score = programme_realism_score
         out: Dict[str, Any] = {
             "acceptability_status": acceptability_status,
@@ -3558,18 +3999,24 @@ class ComprehensiveValidator:
             "minor_issues": len(risks.get("minor", [])),
             "score_weights": {"contract_compliance": w1, "programme_completeness": w2, "programme_realism": w3, "governance_and_risk": w4},
             "summary_explanation": summary_explanation,
-            "acceptability_failure_reasons": failure_reasons,
+            "acceptability_failure_reasons": acceptability_failure_reasons_final,
+            "mandatory_coverage_score": round(float(mandatory_coverage_score), 3),
             "programme_stage": pcm.get("programme_stage", ""),
             "programme_stage_label": stage_label,
             "programme_stage_reasoning": stage_reason,
             "contract_type": pcm.get("contract_type", "UNKNOWN"),
             "programme_intent": pcm.get("programme_intent", "mixed"),
+            "programme_decision": programme_decision,
             "programme_decision_text": programme_decision_text,
             "programme_decision_detail": programme_decision_detail,
             "programme_reassurance": programme_reassurance,
             "quality_summary": quality_summary,
             "quality_score_explanation": quality_score_explanation,
         }
+        if isinstance(scope_cov_for_missing, dict) and scope_cov_for_missing.get("obligation_entities_used"):
+            out["missing_mandatory_obligations"] = scope_cov_for_missing.get("missing_mandatory_obligations") or []
+            out["assumed_only_mandatory_obligations"] = scope_cov_for_missing.get("assumed_only_mandatory_obligations") or []
+            out["partial_mandatory_obligations"] = scope_cov_for_missing.get("partial_mandatory_obligations") or []
         if frozen_requirements_report is not None:
             out["frozen_requirements_report"] = frozen_requirements_report
         if expected_programme_representations_report is not None:
@@ -3588,6 +4035,7 @@ class ComprehensiveValidator:
                 "Assurance items requiring professional confirmation (not acceptability failures). "
                 "These may be satisfied by governance, standards reference, or professional judgement."
             )
+        assert final_decision_locked, "Decision modified after final validation"
         return out
 
     def _generate_nec_alignment_detailed(

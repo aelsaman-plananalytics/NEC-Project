@@ -170,11 +170,29 @@ def build_obligation_entities(contract_data: Dict[str, Any]) -> Dict[str, Any]:
 
     for item in list(contract_data.get("constraints") or []) + list(pcm.get("sequencing_and_timing_constraints") or []):
         text = _original_text_from_item(item)
-        add(text, _clause_reference_from_item(item), FACET_TIMING, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None, None)
+        add(
+            text,
+            _clause_reference_from_item(item),
+            FACET_TIMING,
+            bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else False,
+            None,
+            None,
+            None,
+            None,
+        )
 
     for item in (pcm.get("programme_governance_and_acceptance_rules") or []) + (pcm.get("completion_and_takeover_gates") or []):
         text = _original_text_from_item(item)
-        add(text, _clause_reference_from_item(item), FACET_GOVERNANCE, bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else True, None, None, None, None)
+        add(
+            text,
+            _clause_reference_from_item(item),
+            FACET_GOVERNANCE,
+            bool(item.get("mandatory_for_acceptance")) if isinstance(item, dict) and "mandatory_for_acceptance" in item else False,
+            None,
+            None,
+            None,
+            None,
+        )
 
     # Group by signature and merge
     by_signature: Dict[str, List[RawItem]] = {}

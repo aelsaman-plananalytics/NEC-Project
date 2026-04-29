@@ -201,6 +201,13 @@ def _run_programme_validation(
         validation_output = validator.validate(contract_data, p6_data)
         log_performance_metric("validation", (time.time() - t1) * 1000)
 
+        # Ensure submission_stage is available to the validator summary logic.
+        # This is required for Clause 31 stage-based thresholds in _calculate_validation_summary().
+        if submission_stage is not None:
+            validation_output["submission_stage"] = submission_stage
+            # Recompute summary once so stage-sensitive thresholds apply.
+            validation_output["validation_summary"] = validator._calculate_validation_summary(validation_output)
+
         validation_output["logic_checks"] = logic_checks
         validation_output["schedule_health"] = validator._calculate_schedule_health(
             validation_output["programme_summary"], logic_checks
@@ -376,6 +383,14 @@ async def validate_programme(
         # Rebuilding here ensures obligations_report is derived from the current contract extraction
         # and that programmes missing mandatory obligations FAIL acceptability (single source of truth).
         try:
+            # Preserve expected mandatory count from the uploaded artefact (internal only; not returned).
+            # Used to fail closed if rebuild cannot reconstruct mandatory obligations.
+            _pre_oe = contract_data.get("obligation_entities") or {}
+            _pre_obligations = _pre_oe.get("obligations") if isinstance(_pre_oe, dict) else None
+            if isinstance(_pre_obligations, list):
+                contract_data["_expected_mandatory_obligations_count"] = sum(
+                    1 for o in _pre_obligations if isinstance(o, dict) and o.get("mandatory_for_acceptance")
+                )
             frozen = build_frozen_requirements(contract_data)
             contract_data["obligation_entities"] = frozen["obligation_entities"]
             contract_data["frozen_requirements"] = frozen["frozen_requirements"]
@@ -386,7 +401,15 @@ async def validate_programme(
         # Layer 2: planner lifecycle — apply stage and merge assumptions (does not change acceptability logic)
         # API contract: accept "initial" | "interim" | "final" (and internal names); echo back for response
         submission_stage_api: Optional[str] = (submission_stage_form.strip() or None) if submission_stage_form else None
-        submission_stage_internal = normalize_submission_stage(submission_stage_api) if submission_stage_api else None
+        submission_stage_internal = (
+            submission_stage_form
+            or submission_stage_api
+            or "initial"
+        )
+        if not submission_stage_internal or str(submission_stage_internal).lower() == "string":
+            submission_stage_internal = "initial"
+        submission_stage_internal = str(submission_stage_internal).lower()
+
         planner_assumptions_used: List[Dict[str, Any]] = []
         if planner_assumptions_form:
             try:
@@ -462,7 +485,7 @@ async def validate_programme(
             output_dict = run_with_timeout(
                 lambda: _run_programme_validation(
                     contract_data, xer_content, xer_file.filename, contract_source,
-                    submission_stage=submission_stage_internal or submission_stage_api,
+                    submission_stage=submission_stage_internal,
                     obligation_readiness=obligation_readiness,
                 ),
                 XER_VALIDATION_TIMEOUT,
@@ -496,7 +519,7 @@ async def validate_programme(
         output_dict["obligations_report"] = scope_coverage.get("obligations_report", [])
         output_dict["obligations_not_represented_but_mandatory"] = scope_coverage.get("obligations_not_represented_but_mandatory", [])
         output_dict["scope_evidence_table"] = scope_coverage.get("scope_evidence_table", [])
-        output_dict["submission_stage"] = submission_stage_api
+        output_dict["submission_stage"] = submission_stage_internal
 
         # Enrich obligation_readiness (guidance only) with aligned and required_action from validator report
         readiness = output_dict.get("obligation_readiness") or []

@@ -118,7 +118,7 @@ export default function ResultsReport() {
     <div className="max-w-3xl mx-auto px-4 py-8">
       <h1 className="font-heading text-2xl font-bold text-slate-900 mb-2">Results and report</h1>
       <p className="text-slate-600 mb-6">
-        Your programme validation is complete. Below is the executive summary. Download the full report as a PDF to share or file.
+        Your NEC Clause 31 programme validation is complete. Below is the executive summary. Download the full report as a PDF to share or file.
       </p>
 
       <div className="space-y-6">
@@ -140,7 +140,7 @@ export default function ResultsReport() {
         </section>
 
         <section className="bg-white border border-slate-200 rounded-xl p-6">
-          <h2 className="font-semibold text-slate-800 mb-2">System assessment — Executive summary</h2>
+          <h2 className="font-semibold text-slate-800 mb-2">NEC Engineering Analysis — Executive summary</h2>
           <p className="text-slate-700 font-medium">{reportContent.programmeDecisionText}</p>
           {reportContent.programmeDecisionDetail && (
             <p className="text-slate-600 mt-2">{reportContent.programmeDecisionDetail}</p>

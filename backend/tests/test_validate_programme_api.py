@@ -209,6 +209,58 @@ def test_validate_programme_api_scenario_b_acceptable(
             assert ob_readiness.get("aligned") is True
 
 
+def test_not_acceptable_when_obligations_cannot_be_rebuilt_from_sources(
+    client: TestClient,
+):
+    """
+    Regression: if the uploaded contract JSON is missing the raw obligation sources
+    (e.g. scope_items/constraints) but still contains obligation_entities, the backend
+    rebuild can produce an empty obligations list.
+
+    The system must NOT fall back to legacy acceptance; it must behave like a checkbox:
+    missing/unconstructed obligations should result in NOT_ACCEPTABLE.
+    """
+    # Start from a valid contract with 1 mandatory WBS_ONLY obligation.
+    base_contract = {
+        "scope_items": [
+            {
+                "text": "Utilities Diversions",
+                "mandatory_for_acceptance": True,
+                "evidence_mode": "WBS_ONLY",
+                "canonical_match_string": "utilities diversions",
+            }
+        ],
+        "programme_compliance_model": {},
+        "constraints": [],
+    }
+    frozen = build_frozen_requirements(base_contract)
+
+    # Now simulate an uploaded JSON that only has obligation_entities but is missing
+    # the raw sources needed to rebuild them.
+    contract_json = {
+        "scope_items": [],
+        "programme_compliance_model": {},
+        "constraints": [],
+        "obligation_entities": frozen["obligation_entities"],
+    }
+
+    json_bytes = json.dumps(contract_json).encode("utf-8")
+    response = client.post(
+        "/api/v1/validate_programme",
+        files={
+            "xer_file": ("programme.xer", BytesIO(XER_NO_OBLIGATION), "application/octet-stream"),
+            "json_file": ("contract.json", BytesIO(json_bytes), "application/json"),
+        },
+        data={"submission_stage_form": "initial"},
+    )
+
+    # With final-gate hardening, an empty mandatory-obligation set is a critical error.
+    assert response.status_code == 500, response.text
+    body = response.json()
+    assert body.get("error_code") is not None
+    assert "CRITICAL ERROR: No mandatory obligations found" in (body.get("error_message") or "")
+
+
 # --- Step 5A API hardening tests ---
 
 

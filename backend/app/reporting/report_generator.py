@@ -1,5 +1,5 @@
 """
-Report Generator for NEC Contract Analysis System.
+Report Generator for NEC Engineering Analysis System.
 
 Converts analysis JSON into professional markdown and PDF reports.
 """
@@ -785,7 +785,7 @@ class ReportGenerator:
     ) -> Union[bytes, str]:
         """
         Generates a professional PDF report from JSON data.
-        If input is validation JSON (alignment + contract_summary), produces Programme Validation Report (Sections A–G).
+        If input is validation JSON (alignment + contract_summary), produces NEC Engineering Analysis — Programme Validation Report (Sections A–G).
         Otherwise uses contract analysis template.
         Falls back to DOCX if PDF generation fails.
         report_options: optional dict with confidentiality_mode (redact activity names), organisation_logo_url, user_name.
@@ -1220,7 +1220,7 @@ class ReportGenerator:
     ) -> Union[bytes, str]:
         """
         Generates a professional DOCX report from JSON data.
-        If input is validation JSON (alignment + contract_summary), produces Programme Validation Report (Sections A–G).
+        If input is validation JSON (alignment + contract_summary), produces NEC Engineering Analysis — Programme Validation Report (Sections A–G).
         """
         if "alignment" in json_data and "contract_summary" in json_data:
             return self._generate_validation_docx(json_data, output_path, report_options=report_options)
@@ -1491,7 +1491,7 @@ class ReportGenerator:
         output_path: Optional[str] = None,
         report_options: Optional[Dict[str, Any]] = None,
     ) -> Union[bytes, str]:
-        """Generate Programme Validation Report (Sections A–G) as PDF. Flow-based layout only (Platypus)."""
+        """Generate NEC Engineering Analysis — Programme Validation Report (Sections A–G) as PDF. Flow-based layout only (Platypus)."""
         from app.reporting.validation_report_builder import build_validation_report
         opts = report_options or {}
         redact_activities = opts.get("confidentiality_mode") is True
@@ -1581,7 +1581,7 @@ class ReportGenerator:
         story.append(Spacer(1, 12))
 
         # Section A — Executive Summary
-        story.append(Paragraph("Programme Validation Report", title_style))
+        story.append(Paragraph("NEC Engineering Analysis — Programme Validation Report", title_style))
         story.append(Paragraph(f"<i>Contract: {meta.get('contract_file', '—')}  |  Programme: {meta.get('xer_file', '—')}</i>", styles['Normal']))
         story.append(Spacer(1, 14))
         story.append(Paragraph("Section A — Executive Summary", section_heading_style))
@@ -1600,7 +1600,7 @@ class ReportGenerator:
                 story.append(Paragraph(f"Delivery risk profile: {risk_level}", styles['Normal']))
                 story.append(Paragraph(_delivery_risk_explanation(risk_level), styles['Normal']))
             story.append(Paragraph(
-                "This means the programme meets NEC Clause 31 submission requirements at this stage based on demonstrated alignment of mandatory obligations.",
+                "This programme meets the requirements of NEC Clause 31 based on alignment of mandatory obligations and programme representation.",
                 styles['Normal']
             ))
         if a.get("programme_stage_context"):
@@ -1660,7 +1660,7 @@ class ReportGenerator:
         story.append(Paragraph("How scope and constraints are assessed", section_heading_style))
         story.append(Spacer(1, 8))
         story.append(Paragraph(
-            "This section evaluates whether contractual scope and constraints are clearly represented in the programme through activities, sequencing, and access logic.",
+            "This section evaluates NEC Clause 31 scope and constraint representation through programme activities and logic.",
             styles['Normal']
         ))
         story.append(Spacer(1, 10))
@@ -2022,14 +2022,14 @@ class ReportGenerator:
         output_path: Optional[str] = None,
         report_options: Optional[Dict[str, Any]] = None,
     ) -> Union[bytes, str]:
-        """Generate Programme Validation Report (Sections A–G) as DOCX."""
+        """Generate NEC Engineering Analysis — Programme Validation Report (Sections A–G) as DOCX."""
         from app.reporting.validation_report_builder import build_validation_report
         if not DOCX_AVAILABLE:
             raise ImportError("python-docx not available")
         report = build_validation_report(json_data)
         doc = Document()
         meta = _safe_dict(report.get("metadata"))
-        doc.add_heading("Programme Validation Report", 0)
+        doc.add_heading("NEC Engineering Analysis — Programme Validation Report", 0)
         doc.add_paragraph(f"Contract: {meta.get('contract_file', '—')}  |  Programme: {meta.get('xer_file', '—')}")
         doc.add_heading("Section A — Executive Summary", 1)
         a = _safe_dict(report.get("section_a_executive_summary"))
@@ -2223,7 +2223,7 @@ class ReportGenerator:
         json_data: Dict[str, Any],
         report_options: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Generate Programme Validation Report (Sections A–G) as HTML."""
+        """Generate NEC Engineering Analysis — Programme Validation Report (Sections A–G) as HTML."""
         from app.reporting.validation_report_builder import build_validation_report
         report = build_validation_report(json_data)
         meta = _safe_dict(report.get("metadata"))
@@ -2234,12 +2234,12 @@ class ReportGenerator:
         f_sec = _safe_dict(report.get("section_f_excluded_from_scoring"))
         g = _safe_dict(report.get("section_g_traceability_appendix"))
         html_parts = [
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Programme Validation Report</title>",
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>NEC Engineering Analysis — Programme Validation Report</title>",
             "<style>body{font-family:Segoe UI,Arial,sans-serif;margin:40px;color:#222;}",
             "h1{color:#003366;} h2{margin-top:28px;color:#003366;} h3{margin-top:16px;}",
             "table{width:100%;border-collapse:collapse;margin:12px 0;} th,td{border:1px solid #ccc;padding:8px;text-align:left;}",
             "th{background:#e6eef7;} .verdict{background:#f5f5f5;padding:12px;margin:12px 0;} .meta{color:#666;font-size:0.95em;}</style></head><body>",
-            f"<h1>Programme Validation Report</h1>",
+            f"<h1>NEC Engineering Analysis — Programme Validation Report</h1>",
             f"<p class=\"meta\">Contract: {meta.get('contract_file', '—')} &nbsp;|&nbsp; Programme: {meta.get('xer_file', '—')}</p>",
             "<h2>Section A — Executive Summary</h2>",
             f"<p><strong>Acceptability status:</strong> {a.get('acceptability_status', '—')}</p>",
@@ -2517,7 +2517,7 @@ class ReportGenerator:
     ) -> str:
         """
         Generate HTML report from JSON data.
-        If input is validation JSON (alignment + contract_summary), produces Programme Validation Report (Sections A–G).
+        If input is validation JSON (alignment + contract_summary), produces NEC Engineering Analysis — Programme Validation Report (Sections A–G).
         """
         if "alignment" in json_data and "contract_summary" in json_data:
             return self._generate_validation_html(json_data, report_options=report_options)
