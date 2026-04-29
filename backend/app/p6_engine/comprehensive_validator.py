@@ -3667,7 +3667,7 @@ class ComprehensiveValidator:
         # Partial band is narrow to differentiate borderline cases.
         if submission_stage == "initial":
             acceptable_threshold = 0.50
-            partial_threshold = 0.45
+            partial_threshold = 0.465
         elif submission_stage == "revised":
             acceptable_threshold = 0.60
             partial_threshold = 0.50

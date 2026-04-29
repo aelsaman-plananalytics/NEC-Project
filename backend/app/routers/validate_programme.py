@@ -265,6 +265,48 @@ def _run_programme_validation(
                 pass
 
 
+def _activity_identity(activity: Dict[str, Any]) -> Optional[str]:
+    """
+    Stable activity identity for diffing two programmes.
+
+    Prefer GUID-like fields when present; otherwise fall back to task_id.
+    """
+    if not isinstance(activity, dict):
+        return None
+    for k in (
+        "task_guid",
+        "guid",
+        "activity_guid",
+        "task_uuid",
+        "unique_id",
+        "uid",
+        "task_id",
+        "id",
+    ):
+        v = activity.get(k)
+        if v is not None:
+            s = str(v).strip()
+            if s:
+                return s
+    return None
+
+
+def _load_xer_from_bytes(xer_bytes: bytes) -> Dict[str, Any]:
+    """Load XER into structured dict from bytes (temp file)."""
+    temp_xer_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xer") as tmp:
+            tmp.write(xer_bytes)
+            temp_xer_path = tmp.name
+        return XERLoader().load_xer(temp_xer_path)
+    finally:
+        if temp_xer_path and os.path.exists(temp_xer_path):
+            try:
+                os.unlink(temp_xer_path)
+            except Exception:
+                pass
+
+
 # Deprecated: use POST /api/v1/validate_programme. Kept for backward compatibility.
 @router.post("/validate_programme", deprecated=True, include_in_schema=False)
 @router.post("/v1/validate_programme")
@@ -544,7 +586,7 @@ async def validate_programme(
                         previous_xer_content,
                         previous_xer_filename,
                         contract_source,
-                        submission_stage=submission_stage_internal or submission_stage_api,
+                        submission_stage=submission_stage_internal,
                         obligation_readiness=obligation_readiness,
                     ),
                     XER_VALIDATION_TIMEOUT,
@@ -560,16 +602,46 @@ async def validate_programme(
                     "overall_status": prev_vs.get("overall_status"),
                     "obligations_report": prev_scope.get("obligations_report", []),
                     "obligations_not_represented_but_mandatory": prev_scope.get("obligations_not_represented_but_mandatory", []),
-                    "submission_stage": submission_stage_api,
+                    "submission_stage": submission_stage_internal,
                 }
                 evolution = build_submission_evolution(output_dict, previous_response)
                 build_planner_guidance(output_dict, previous_response)  # for consistency; not added to response
+
+                # -----------------------------------------------------------------
+                # Programme activity diff (identity-based; observational only)
+                # -----------------------------------------------------------------
+                try:
+                    current_p6 = _load_xer_from_bytes(xer_content)
+                    previous_p6 = _load_xer_from_bytes(previous_xer_content)
+                    curr_acts = list(current_p6.get("activities") or [])
+                    prev_acts = list(previous_p6.get("activities") or [])
+
+                    curr_ids = {aid for aid in (_activity_identity(a) for a in curr_acts) if aid}
+                    prev_ids = {aid for aid in (_activity_identity(a) for a in prev_acts) if aid}
+
+                    removed_ids = sorted(prev_ids - curr_ids)
+                    added_ids = sorted(curr_ids - prev_ids)
+
+                    activity_diff = {
+                        "identity_basis": "guid_or_task_id",
+                        "removed_count": len(removed_ids),
+                        "added_count": len(added_ids),
+                        "removed_sample": removed_ids[:5],
+                        "added_sample": added_ids[:5],
+                    }
+                except Exception as diff_err:
+                    activity_diff = {
+                        "identity_basis": "guid_or_task_id",
+                        "error": str(diff_err),
+                    }
+
                 output_dict["submission_comparison"] = {
                     "comparison_mode": "file_upload",
                     "previous_programme_name": previous_xer_filename,
                     "status_change": evolution["submission_evolution_summary"]["status_change"],
                     "became_aligned": evolution["obligation_changes"]["became_aligned"],
                     "became_unaligned": evolution["obligation_changes"]["became_unaligned"],
+                    "activity_diff": activity_diff,
                 }
             else:
                 output_dict["submission_comparison"] = None
