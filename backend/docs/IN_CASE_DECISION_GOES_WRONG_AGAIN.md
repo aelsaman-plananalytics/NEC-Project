@@ -1,4 +1,12 @@
-# NEC Contract Extractors
+# In case decision goes wrong again
+
+This note is a “where to look” guide for the most common **extraction / evidence** environment issues that can cause unexpected validation outputs.
+
+It also contains a compact overview of the contract extraction modules so you know where relevant behaviour lives.
+
+---
+
+# NEC Contract Extractors (reference)
 
 Table extraction, clause parsing, and contract data models for NEC documents.
 
@@ -96,6 +104,10 @@ Required packages:
 - `pandas` - Table data handling
 - `Pillow` - Image processing
 
+System dependencies (most common missing pieces):
+- **Tesseract OCR** must be installed and available on PATH
+- **Ghostscript** is required by Camelot on many systems
+
 Install with:
 ```bash
 pip install camelot-py[cv] pdfplumber pytesseract pdf2image pandas Pillow
@@ -107,6 +119,20 @@ pip install camelot-py[cv] pdfplumber pytesseract pdf2image pandas Pillow
 - OCR fallback is slower but handles scanned documents
 - Table extraction accuracy depends on PDF quality
 - Clause parsing uses regex patterns optimized for NEC contract format
+
+## Troubleshooting
+
+### OCR / table extraction fails (no tables, empty output)
+
+Checks:
+- Confirm Tesseract is installed and callable:
+
+```bash
+tesseract --version
+```
+
+- For Camelot, confirm Ghostscript is installed.
+- If PDFs are scanned/images, OCR will be used and may be slow; ensure `pdf2image` can find a PDF renderer (Poppler on Windows setups).
 
 
 
